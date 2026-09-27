@@ -6,7 +6,7 @@ import { StatusBadge } from '@/components/StatusBadge'
 import { RelationshipGraph } from '@/components/RelationshipGraph'
 import { EvidenceList } from '@/components/EvidenceList'
 import { supabaseBrowser } from '@/lib/supabase'
-import { normalizeCnpj,isValidCnpj } from '@/lib/cnpj'
+import { normalizeCnpj } from '@/lib/cnpj'
 
 type Tab='resumo'|'ecossistema'|'timeline'|'sinais'|'pesquisa'|'evidencias'|'pendencias'
 const tabs:{key:Tab;label:string}[]=[
