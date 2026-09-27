@@ -25,7 +25,8 @@ button,input,select{font:inherit}.hidden{display:none!important}.login{min-heigh
 </style>
 </head>
 <body>
-<div id="loading" class="login"><div class="login-card"><div class="brand">MAX<small>INTELLIGENCE SaaS</small></div><h2>Carregando ambiente de testes…</h2><p class="muted">A sessão fica salva neste navegador para evitar novos logins.</p></div></div>\n<div id="login" class="login hidden">
+<div id="loading" class="login"><div class="login-card"><div class="brand">MAX<small>INTELLIGENCE SaaS</small></div><h2>Carregando ambiente de testes…</h2><p class="muted">A sessão fica salva neste navegador para evitar novos logins.</p></div></div>
+<div id="login" class="login hidden">
   <div class="login-card">
     <div class="brand">MAX<small>INTELLIGENCE SaaS</small></div>
     <h1 id="authTitle">Entrar</h1>
@@ -51,14 +52,14 @@ button,input,select{font:inherit}.hidden{display:none!important}.login{min-heigh
         <button data-page="leads">Leads</button>
         <button data-page="sources">Fontes</button>
       </div>
-      <div style="margin-top:30px"><button id="logout" class="btn secondary">Sair</button></div>
+      <div style="margin-top:30px"><span class="small">Modo de teste · acesso automático</span><button id="logout" class="btn secondary hidden">Sair</button></div>
     </aside>
     <main class="main">
       <div class="mobile-nav">
         <button class="btn secondary" data-page="dashboard">Visão geral</button>
         <button class="btn secondary" data-page="leads">Leads</button>
         <button class="btn secondary" data-page="sources">Fontes</button>
-        <button class="btn secondary" id="mobileLogout">Sair</button>
+        <button class="btn secondary hidden" id="mobileLogout">Sair</button>
       </div>
       <div id="flash" class="banner hidden"></div>
       <section id="page-dashboard"></section>
@@ -93,7 +94,14 @@ $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authBtn').disabled=true
 async function signout(){await sb.auth.signOut()}$('#logout').onclick=signout;$('#mobileLogout').onclick=signout;
 
 async function sessionUI(session){$('#loading')?.classList.add('hidden');$('#login').classList.toggle('hidden',!!session);$('#app').classList.toggle('hidden',!session);if(session)setPage('dashboard')}
-sb.auth.onAuthStateChange((_,s)=>{if(bootstrapping&&!s)return;sessionUI(s)});
+sb.auth.onAuthStateChange((event,s)=>{
+  if(bootstrapping&&!s)return;
+  if(!s && event==='SIGNED_OUT'){
+    bootstrapping=true;
+    return bootstrapTestSession();
+  }
+  sessionUI(s);
+});
 async function bootstrapTestSession(){
   const {data:{session}}=await sb.auth.getSession();
   if(session){bootstrapping=false;return sessionUI(session)}
