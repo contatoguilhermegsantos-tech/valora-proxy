@@ -15,10 +15,24 @@ const tabs:{key:Tab;label:string}[]=[
 
 export default function LeadDossier(){
  const params=useParams<{id:string}>();const leadId=String(params.id)
- const [d,setD]=useState<any>(null);const [tab,setTab]=useState<Tab>('resumo');const [busy,setBusy]=useState(false);const [msg,setMsg]=useState('')
+ const [d,setD]=useState<any>(null);const [jobs,setJobs]=useState<any[]>([]);const [tab,setTab]=useState<Tab>('resumo');const [busy,setBusy]=useState(false);const [msg,setMsg]=useState('')
  const [strategy,setStrategy]=useState('EMPRESARIO');const [cnpj,setCnpj]=useState('')
- const load=useCallback(async()=>{const {data,error}=await supabaseBrowser().functions.invoke('get-dossier',{body:{lead_id:leadId}});if(error)setMsg(error.message);else setD(data)},[leadId])
- useEffect(()=>{load()},[load])
+ const load=useCallback(async()=>{
+  const sb=supabaseBrowser();
+  const [dossier,queue]=await Promise.all([
+   sb.functions.invoke('get-dossier',{body:{lead_id:leadId}}),
+   sb.functions.invoke('research-queue',{body:{action:'list',lead_id:leadId,limit:20}})
+  ]);
+  if(dossier.error)setMsg(dossier.error.message);else setD(dossier.data);
+  if(!queue.error)setJobs(queue.data?.jobs||[]);
+ },[leadId])
+ useEffect(()=>{void load()},[load])
+ useEffect(()=>{
+  const active=jobs.some((j:any)=>['PENDING','RUNNING','RETRY'].includes(j.status));
+  if(!active)return;
+  const timer=setInterval(()=>{void load()},2500);
+  return()=>clearInterval(timer);
+ },[jobs,load])
  useEffect(()=>{if(!d)return;const seg=String(d.lead?.segment||'').toLowerCase();setStrategy(/agro|rural|fazenda|pecu|agric/.test(seg)?'AGRO':/medic|saude|saúde|clinic|hospital/.test(seg)?'MEDICO':d.lead?.kind==='COMPANY'?'EMPRESARIO':'GENERICO');setCnpj(d.lead?.initial_cnpj||'')},[d])
  const evidenceMap=useMemo(()=>new Map((d?.evidence||[]).map((e:any)=>[e.id,e])),[d])
  if(!d)return <Shell><div className="page-loading">{msg||'Carregando dossiê…'}</div></Shell>
@@ -27,16 +41,21 @@ export default function LeadDossier(){
  const facts=claims.filter((c:any)=>c.classification==='FACT'&&c.status==='VERIFIED')
  const coverage=d.coverage||{};const sourceCoverage=d.source_coverage||{}
 
- async function startResearch(){setBusy(true);setMsg('');const {data,error}=await supabaseBrowser().functions.invoke('start-research',{body:{lead_id:leadId,strategy,cnpj:cnpj.replace(/\D/g,'')||undefined}});setMsg(error?error.message:`Pesquisa concluída: ${data?.status||'ok'}`);await load();setBusy(false);setTab('pesquisa')}
+ async function startResearch(){
+  setBusy(true);setMsg('');
+  const {data,error}=await supabaseBrowser().functions.invoke('research-queue',{body:{action:'enqueue',lead_id:leadId,strategy,cnpj:cnpj.replace(/\D/g,'')||undefined}});
+  setMsg(error?error.message:(data?.existing?.length?'Já existe uma investigação ativa para este lead.':'Investigação iniciada em segundo plano. Você pode continuar usando o MAX enquanto as fontes são consultadas.'));
+  await load();setBusy(false);setTab('pesquisa');
+ }
  async function confirmCandidate(id:string){
   setBusy(true);setMsg('');
   const candidate=candidates.find((x:any)=>x.id===id);
   const {data,error}=await supabaseBrowser().functions.invoke('confirm-company-candidate',{body:{candidate_id:id}});
   if(error){setMsg(error.message);setBusy(false);return}
   const chosenCnpj=String(data?.cnpj||candidate?.metadata?.full_cnpj||'').replace(/\D/g,'');
-  setMsg('Vínculo confirmado. Executando a investigação profunda com o CNPJ encontrado…');
-  const run=await supabaseBrowser().functions.invoke('start-research',{body:{lead_id:leadId,strategy,cnpj:chosenCnpj||undefined}});
-  if(run.error)setMsg(run.error.message);else setMsg(`Candidato confirmado e nova pesquisa concluída: ${run.data?.status||'ok'}`);
+  setMsg('Vínculo confirmado. A investigação profunda foi colocada na fila.');
+  const run=await supabaseBrowser().functions.invoke('research-queue',{body:{action:'enqueue',lead_id:leadId,strategy,cnpj:chosenCnpj||undefined}});
+  if(run.error)setMsg(run.error.message);else setMsg('Candidato confirmado. Pesquisa profunda rodando em segundo plano.');
   await load();setBusy(false);setTab('pesquisa');
  }
  async function derive(){setBusy(true);const {error}=await supabaseBrowser().functions.invoke('derive-signals',{body:{lead_id:leadId}});if(error)setMsg(error.message);await load();setBusy(false);setTab('sinais')}
@@ -58,7 +77,7 @@ export default function LeadDossier(){
 
   {tab==='sinais'&&<div className="stack">{signals.length?signals.map((s:any)=><div className="card signal" key={s.id}><div style={{display:'flex',justifyContent:'space-between',gap:12}}><div><div className="micro">{s.classification} · confiança {s.confidence}</div><h3>{s.title}</h3></div><StatusBadge value={s.status}/></div><p>{s.summary}</p>{s.commercial_theme&&<p><strong>Tema consultivo:</strong> {s.commercial_theme}</p>}{s.discovery_question&&<div className="question"><strong>Pergunta:</strong> {s.discovery_question}</div>}{s.caution&&<div className="caution" style={{marginTop:10}}>{s.caution}</div>}</div>):<div className="empty">Nenhum sinal consultivo sustentado ainda.</div>}</div>}
 
-  {tab==='pesquisa'&&<div className="two"><div className="stack">{runs.length?runs.map((r:any)=><div className="card" key={r.id}><div style={{display:'flex',justifyContent:'space-between'}}><div><strong>{r.strategy}</strong><div className="micro">{new Date(r.created_at).toLocaleString('pt-BR')}</div></div><StatusBadge value={r.status}/></div><div className="section">{(r.research_steps||[]).sort((a:any,b:any)=>a.step_order-b.step_order).map((s:any)=><div className="research-step" key={s.id}><div className="step-num">{s.step_order}</div><div><strong>{s.title}</strong><div className="muted">{s.result_summary||s.error_summary||'Aguardando'}</div>{s.action_url&&<a className="source-link" target="_blank" rel="noreferrer" href={s.action_url}>Abrir fonte ↗</a>}</div><StatusBadge value={s.status}/></div>)}</div></div>):<div className="empty">Nenhuma execução anterior.</div>}</div><div className="stack">{candidates.length>0&&<div className="card"><h3>Candidatos de empresa encontrados</h3><div className="caution">Selecione o vínculo correto para o MAX obter o CNPJ e liberar BNDES, PNCP, CVM e demais fontes.</div><CandidateList rows={candidates} busy={busy} onConfirm={confirmCandidate}/></div>}<div className="card"><h3>Iniciar investigação</h3><div className="form"><label className="label">Estratégia<select className="select" value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="EMPRESARIO">Empresário</option><option value="AGRO">Agro</option><option value="MEDICO">Médico</option><option value="GENERICO">Genérico</option></select></label><label className="label">CNPJ inicial (opcional)<input className="input" value={cnpj} onChange={e=>setCnpj(e.target.value)} placeholder="14 dígitos"/></label><button className="btn" disabled={busy} onClick={startResearch}>{busy?'Executando…':'Executar trilha'}</button><p className="muted">Você pode começar só pelo nome. Se o MAX localizar empresas candidatas no QSA público, ele pedirá a confirmação do vínculo antes de atribuir o CNPJ ao lead.</p></div></div></div></div>}
+  {tab==='pesquisa'&&<div className="two"><div className="stack">{jobs.length>0&&<div className="card"><h3>Fila de investigação</h3>{jobs.slice(0,6).map((j:any)=><div className="research-step" key={j.id}><div className="step-num">↻</div><div><strong>{j.strategy} · {j.progress?.stage||j.status}</strong><div className="muted">{j.progress?.message||'Aguardando processamento.'}</div>{j.last_error&&<div className="micro" style={{color:'#b42318'}}>{j.last_error}</div>}<div className="micro">{new Date(j.created_at).toLocaleString('pt-BR')}</div></div><StatusBadge value={j.status}/></div>)}</div>}{runs.length?runs.map((r:any)=><div className="card" key={r.id}><div style={{display:'flex',justifyContent:'space-between'}}><div><strong>{r.strategy}</strong><div className="micro">{new Date(r.created_at).toLocaleString('pt-BR')}</div></div><StatusBadge value={r.status}/></div><div className="section">{(r.research_steps||[]).sort((a:any,b:any)=>a.step_order-b.step_order).map((s:any)=><div className="research-step" key={s.id}><div className="step-num">{s.step_order}</div><div><strong>{s.title}</strong><div className="muted">{s.result_summary||s.error_summary||'Aguardando'}</div>{s.action_url&&<a className="source-link" target="_blank" rel="noreferrer" href={s.action_url}>Abrir fonte ↗</a>}</div><StatusBadge value={s.status}/></div>)}</div></div>):<div className="empty">Nenhuma execução anterior.</div>}</div><div className="stack">{candidates.length>0&&<div className="card"><h3>Candidatos de empresa encontrados</h3><div className="caution">Selecione o vínculo correto para o MAX obter o CNPJ e liberar BNDES, PNCP, CVM e demais fontes.</div><CandidateList rows={candidates} busy={busy} onConfirm={confirmCandidate}/></div>}<div className="card"><h3>Iniciar investigação</h3><div className="form"><label className="label">Estratégia<select className="select" value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="EMPRESARIO">Empresário</option><option value="AGRO">Agro</option><option value="MEDICO">Médico</option><option value="GENERICO">Genérico</option></select></label><label className="label">CNPJ inicial (opcional)<input className="input" value={cnpj} onChange={e=>setCnpj(e.target.value)} placeholder="14 dígitos"/></label><button className="btn" disabled={busy} onClick={startResearch}>{busy?'Enfileirando…':'Iniciar investigação'}</button><p className="muted">A pesquisa roda em segundo plano e o progresso aparece na fila acima. Você pode começar só pelo nome. Se o MAX localizar empresas candidatas no QSA público, ele pedirá a confirmação do vínculo antes de atribuir o CNPJ ao lead.</p></div></div></div></div>}
 
   {tab==='evidencias'&&<div className="card"><h3>Evidências persistidas</h3><EvidenceList rows={evidence} onReview={reviewEvidence}/></div>}
 
