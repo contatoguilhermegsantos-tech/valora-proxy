@@ -9,7 +9,28 @@ type Workspace={id:string;name:string;plan_key:string;role:string}
 export function Shell({children}:{children:React.ReactNode}){
   const path=usePathname(); const router=useRouter(); const [workspaces,setWorkspaces]=useState<Workspace[]>([]);const [active,setActive]=useState('');
   const items=[['/dashboard','Visão geral'],['/leads','Leads'],['/research','Pesquisas'],['/sources','Fontes'],['/team','Equipe']]
-  useEffect(()=>{(async()=>{const sb=supabaseBrowser();const {data:j,error}=await sb.functions.invoke('workspaces',{body:{action:'list'}});if(error)return;setWorkspaces(j?.organizations||[]);setActive(j?.active_organization_id||'')})()},[])
+  useEffect(()=>{
+    let cancelled=false
+    const sb=supabaseBrowser()
+    async function loadWorkspaces(){
+      for(let attempt=0;attempt<6&&!cancelled;attempt++){
+        const {data:{session}}=await sb.auth.getSession()
+        if(!session){await new Promise(r=>setTimeout(r,300*(attempt+1)));continue}
+        const {data:j,error}=await sb.functions.invoke('workspaces',{body:{action:'list'}})
+        if(!error){
+          if(!cancelled){setWorkspaces(j?.organizations||[]);setActive(j?.active_organization_id||'')}
+          return
+        }
+        if((error as any)?.context?.status!==401)return
+        await new Promise(r=>setTimeout(r,350*(attempt+1)))
+      }
+    }
+    void loadWorkspaces()
+    const {data:authListener}=sb.auth.onAuthStateChange((event,session)=>{
+      if(event==='SIGNED_IN'&&session) void loadWorkspaces()
+    })
+    return()=>{cancelled=true;authListener.subscription.unsubscribe()}
+  },[])
   async function logout(){await supabaseBrowser().auth.signOut();router.replace('/login')}
   async function switchWorkspace(id:string){if(!id||id===active)return;const {error}=await supabaseBrowser().functions.invoke('workspaces',{body:{action:'switch',organization_id:id}});if(error){window.alert(error.message);return}setActive(id);window.location.href='/dashboard'}
   return <AuthGate><div className="shell"><aside className="sidebar">
