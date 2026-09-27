@@ -73,7 +73,7 @@ button,input,select{font:inherit}.hidden{display:none!important}.login{min-heigh
 const SB_URL='https://dczropngwfoxybdmybgw.supabase.co';
 const SB_KEY='sb_publishable_Y65sof58bUDmppRbUwwV4g_yraQyqy3';
 const sb=supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,storage:window.localStorage,storageKey:'max-v1-auth'}});
-let mode='login';
+let mode='login', bootstrapping=true;
 
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -93,7 +93,24 @@ $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authBtn').disabled=true
 async function signout(){await sb.auth.signOut()}$('#logout').onclick=signout;$('#mobileLogout').onclick=signout;
 
 async function sessionUI(session){$('#loading')?.classList.add('hidden');$('#login').classList.toggle('hidden',!!session);$('#app').classList.toggle('hidden',!session);if(session)setPage('dashboard')}
-sb.auth.onAuthStateChange((_,s)=>sessionUI(s));sb.auth.getSession().then(({data})=>sessionUI(data.session));
+sb.auth.onAuthStateChange((_,s)=>{if(bootstrapping&&!s)return;sessionUI(s)});
+async function bootstrapTestSession(){
+  const {data:{session}}=await sb.auth.getSession();
+  if(session){bootstrapping=false;return sessionUI(session)}
+  try{
+    const {data,error}=await sb.auth.signInAnonymously({options:{data:{purpose:'max-v1-preview'}}});
+    if(error) throw error;
+    bootstrapping=false;
+    return sessionUI(data.session);
+  }catch(err){
+    console.warn('Auto test session unavailable:',err?.message||err);
+    bootstrapping=false;
+    sessionUI(null);
+    $('#authMsg').textContent='Modo automático de teste ainda não está habilitado no Supabase. A tela de login foi mantida como fallback.';
+    $('#authMsg').classList.remove('hidden');
+  }
+}
+bootstrapTestSession();
 
 async function dashboard(){
  const [{count:l},{count:e},{count:v},{count:d},{data:r}]=await Promise.all([
