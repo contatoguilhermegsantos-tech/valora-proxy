@@ -2,9 +2,13 @@
 import { useEffect,useState } from 'react'
 import { SourceBacklog } from '@/components/SourceBacklog'
 import { Shell } from '@/components/Shell'
+import { AuthGate } from '@/components/AuthGate'
 import { StatusBadge } from '@/components/StatusBadge'
 import { supabaseBrowser } from '@/lib/supabase'
 export default function Sources(){
+ return <AuthGate><SourcesContent/></AuthGate>
+}
+function SourcesContent(){
  const [backlog,setBacklog]=useState<any[]>([]);const [quality,setQuality]=useState<any>(null);const [error,setError]=useState('');const [loading,setLoading]=useState(true)
  const [rows,setRows]=useState<any[]>([]);const [sync,setSync]=useState<any[]>([]);const [backfill,setBackfill]=useState<any[]>([])
  useEffect(()=>{let cancelled=false;(async()=>{try{const {data,error}=await supabaseBrowser().functions.invoke('get-source-status',{body:{}});if(cancelled)return;if(error)throw error;setRows(data.sources||[]);setSync(data.sync||[]);setBackfill(data.backfill||[]);setBacklog(data.backlog||[]);setQuality(data.quality)}catch(e){if(!cancelled)setError(e instanceof Error?e.message:'Não foi possível carregar as fontes.')}finally{if(!cancelled)setLoading(false)}})();return()=>{cancelled=true}},[])
