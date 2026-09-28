@@ -4,3 +4,5 @@
 @media(max-width:800px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto;display:block}.nav{display:flex;overflow:auto}.sidebar-foot{display:none}.main{padding:18px}.graph-wrap{min-height:500px}}
 @media(max-width:560px){.grid,.grid3,.form-row,.meta-grid{grid-template-columns:1fr}.h1{font-size:25px}.top{display:block}.top>.actions{margin-top:12px}}
 .workspace-select{width:100%;background:#182230;color:#fff;border:1px solid #344054;border-radius:9px;padding:9px 10px;font-size:11px;outline:none}.workspace-select option{background:#101828;color:#fff}
+.company-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}.company-facts dt{font-size:12px;color:#667085}.company-facts dd{margin:5px 0;font-weight:600;overflow-wrap:anywhere}.company-facts+details{margin-top:12px}
+

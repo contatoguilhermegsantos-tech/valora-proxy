@@ -1,3 +1,4 @@
+import { resolveCompanyCnpj } from '../_shared/company-context.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -80,11 +81,14 @@ Deno.serve(async(req:Request)=>{
       .in("status",["PENDING","RUNNING","RETRY"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
     if(active){existing.push(active);continue}
 
-    const requested=String(b.strategy||"").toUpperCase();
+    const {data:contextLinks,error:contextError}=lead.kind==='COMPANY'?await admin.from('lead_company_links').select('status,companies(cnpj)').eq('organization_id',orgId).eq('lead_id',lead.id):{data:[],error:null};
+ if(contextError)return new Response(JSON.stringify({error:contextError.message}),{status:500,headers:H});
+ let resolvedCnpj='';try{resolvedCnpj=resolveCompanyCnpj(lead,b.cnpj,contextLinks||[])}catch(e){return new Response(JSON.stringify({error:String((e as Error).message)}),{status:409,headers:H})}
+ const requested=String(b.strategy||"").toUpperCase();
     const strategy=["EMPRESARIO","AGRO","MEDICO","GENERICO"].includes(requested)?requested:inferStrategy(lead);
     const payload={
       objective:b.objective||"Investigação profunda assíncrona baseada em evidências",
-      cnpj:cnpjNorm(b.cnpj||lead.initial_cnpj)||null,
+      cnpj:resolvedCnpj||null,
       source:"research_queue",
       ...(b.payload&&typeof b.payload==="object"?b.payload:{})
     };

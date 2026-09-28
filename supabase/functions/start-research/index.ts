@@ -1,3 +1,4 @@
+import { resolveCompanyCnpj } from '../_shared/company-context.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -91,7 +92,10 @@ Deno.serve(async(req:Request)=>{
   if(membership.role==="VIEWER")return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
  const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
  if(!lead)return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
- const cnpj=cnpjShape(requestCnpj)?requestCnpj:cnpjNorm(lead.initial_cnpj);
+ const {data:contextLinks,error:contextError}=lead.kind==='COMPANY'?await admin.from('lead_company_links').select('status,companies(cnpj)').eq('organization_id',orgId).eq('lead_id',lead.id):{data:[],error:null};
+ if(contextError)return new Response(JSON.stringify({error:contextError.message}),{status:500,headers:H});
+ let resolvedCnpj='';try{resolvedCnpj=resolveCompanyCnpj(lead,b.cnpj,contextLinks||[])}catch(e){return new Response(JSON.stringify({error:String((e as Error).message)}),{status:409,headers:H})}
+ const cnpj=resolvedCnpj;
 
  const {data:sources}=await admin.from("source_registry").select("key,name,connection_status,action_url,limitations");
  const sourceMap=new Map((sources||[]).map((s:any)=>[s.key,s]));
@@ -121,7 +125,8 @@ Deno.serve(async(req:Request)=>{
   let identityStatus=String(lead.identity_status||"PENDING");
   let supportedClusterCompanies:any[]=[];
 
-  if(defs.some(s=>s.key==="name_discovery")){
+  if(lead.kind==="COMPANY"){await setStep("name_discovery","SKIPPED","Núcleo empresarial: investigação pelo CNPJ, sem busca de sócios pelo nome da empresa.");}
+  if(lead.kind!=="COMPANY"&&defs.some(s=>s.key==="name_discovery")){
     await setStep("name_discovery","RUNNING");
     const {resp,data}=await callFn(url,auth,"name-company-discovery",{lead_id:leadId,research_run_id:run.id});
     if(resp.ok){
@@ -339,7 +344,8 @@ Deno.serve(async(req:Request)=>{
    else await setStep("signals","FAILED",undefined,data?.error||("HTTP "+resp.status));
   }
 
-  const {data:steps}=await admin.from("research_steps").select("role,status").eq("research_run_id",run.id);
+  const {data:steps,error:stepsError}=await admin.from("research_steps").select("status").eq("research_run_id",run.id);
+  if(stepsError)throw stepsError;
   const statuses=(steps||[]).map((x:any)=>x.status);
   const counts={completed:statuses.filter((s:string)=>s==="COMPLETED").length,partial:statuses.filter((s:string)=>s==="PARTIAL").length,blocked:statuses.filter((s:string)=>s==="BLOCKED").length,failed:statuses.filter((s:string)=>s==="FAILED").length};
   const finalStatus=counts.failed>0||counts.blocked>0||counts.partial>0?"PARTIAL":"COMPLETED";

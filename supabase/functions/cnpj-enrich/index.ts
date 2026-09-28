@@ -134,7 +134,7 @@ Deno.serve(async (req: Request) => {
     source_url: `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
     source_kind: "AGGREGATOR", document_type: "CNPJ_REGISTRY",
     publisher: "BrasilAPI / dados de origem RFB", retrieved_at: new Date().toISOString(),
-    dedupe_key: `brasilapi:cnpj:${cnpj}:${normalized.status_date || "current"}`,
+    dedupe_key: `brasilapi:cnpj:${leadId}:${cnpj}:${normalized.status_date || "current"}`,
     reliability_weight: 0.75, raw_reference: cnpj,
     excerpt: `Razão social: ${normalized.legal_name ?? "não informada"}; situação: ${normalized.registration_status ?? "não informada"}; município/UF: ${normalized.city ?? "?"}/${normalized.state ?? "?"}; CNAE: ${normalized.cnae_description ?? "não informado"}; QSA: ${qsa.map((x:any)=>x.name + (x.role ? " ("+x.role+")" : "")).join("; ") || "não informado"}.`,
     verification_status: "VERIFIED", last_verified_at: new Date().toISOString(),
@@ -145,6 +145,12 @@ Deno.serve(async (req: Request) => {
   if (evError) return new Response(JSON.stringify({ error: "Could not persist evidence", detail: evError.message }), { status: 500, headers: JSON_HEADERS });
 
   const facts = [
+    ["CNPJ_OPENING", normalized.legal_name || cnpj, "opening_date", raw.data_inicio_atividade, raw.data_inicio_atividade],
+    ["CNPJ_LEGAL_NATURE", normalized.legal_name || cnpj, "legal_nature", raw.natureza_juridica, null],
+    ["CNPJ_SIZE", normalized.legal_name || cnpj, "company_size", normalized.size, null],
+    ["CNPJ_BRANCH", normalized.legal_name || cnpj, "headquarters_branch", normalized.headquarters_branch, null],
+    ["CNPJ_CAPITAL", normalized.legal_name || cnpj, "registered_capital", normalized.capital_social==null?null:String(normalized.capital_social), null],
+    ["CNPJ_SECONDARY_ACTIVITIES", normalized.legal_name || cnpj, "secondary_activities", (raw.cnaes_secundarios||[]).map(x=>x.descricao).filter(Boolean).join("; "), null],
     ["CNPJ_STATUS", normalized.legal_name || cnpj, "registration_status", normalized.registration_status, normalized.status_date],
     ["CNPJ_NAME", normalized.legal_name || cnpj, "legal_name", normalized.legal_name, null],
     ["CNPJ_LOCATION", normalized.legal_name || cnpj, "location", [normalized.city, normalized.state].filter(Boolean).join("/") || null, null],
@@ -172,7 +178,7 @@ Deno.serve(async (req: Request) => {
       await admin.from("claim_evidence").upsert({
         organization_id: orgId, claim_id: claimId, evidence_id: evidence.id, support_type: "SUPPORTS", strength: 1
       }, { onConflict: "claim_id,evidence_id" });
-      await admin.from("claims").update({ status: "VERIFIED" }).eq("id", claimId).neq("status","CONTRADICTED");
+      await admin.from("claims").update({ status: "VERIFIED" }).eq("id", claimId).not("status","in","(CONTRADICTED,REJECTED)");
       claimIds.push(claimId);
     }
   }
@@ -251,7 +257,7 @@ Deno.serve(async (req: Request) => {
       await admin.from("relationship_evidence").upsert({
         organization_id:orgId,relationship_id:relId,evidence_id:evidence.id,support_type:"SUPPORTS",strength:1
       }, { onConflict:"relationship_id,evidence_id" });
-      await admin.from("relationships").update({status:"VERIFIED"}).eq("id",relId);
+      await admin.from("relationships").update({status:"VERIFIED"}).eq("id",relId).not("status","in","(CONTRADICTED,REJECTED)");
       relationshipIds.push(relId);
     }
   }

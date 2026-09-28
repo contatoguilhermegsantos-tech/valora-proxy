@@ -9,7 +9,8 @@ const H={
   "Access-Control-Allow-Methods":"POST, OPTIONS"
 };
 const API="https://centraldebalancos.estaleiro.serpro.gov.br/centralbalancos/servicesapi/api";
-const digits=(v:unknown)=>String(v??"").replace(/\D/g,"");
+const cnpjNorm=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+const cnpjShape=(v:unknown)=>/^[A-Z0-9]{12}[0-9]{2}$/.test(cnpjNorm(v));
 const safeDate=(v:unknown)=>{
   const s=String(v??"").trim();
   if(!s||s.startsWith("0001-01-01")) return null;
@@ -75,8 +76,8 @@ Deno.serve(async(req:Request)=>{
     admin.from("source_registry").select("id").eq("key","central_balancos_sped").maybeSingle()
   ]);
   if(!lead||!company) return new Response(JSON.stringify({error:"Lead or company not found"}),{status:404,headers:H});
-  const cnpj=digits(company.cnpj);
-  if(cnpj.length!==14) return new Response(JSON.stringify({error:"Company has no valid CNPJ"}),{status:400,headers:H});
+  const cnpj=cnpjNorm(company.cnpj);
+  if(!cnpjShape(cnpj)) return new Response(JSON.stringify({error:"Company has no valid numeric/alphanumeric CNPJ"}),{status:400,headers:H});
 
   const started=Date.now();
   const participantRes=await getJson(API+"/Participante/"+cnpj);
@@ -90,7 +91,7 @@ Deno.serve(async(req:Request)=>{
   }
 
   const participantItems=Array.isArray(participantRes.data?.items)?participantRes.data.items:[];
-  const participant=participantItems.length===1?participantItems[0]:participantItems.find((x:any)=>digits(x?.cnpj)===cnpj)||null;
+  const participant=participantItems.length===1?participantItems[0]:participantItems.find((x:any)=>cnpjNorm(x?.cnpj)===cnpj)||null;
   if(!participant?.id){
     const now=new Date().toISOString();
     await Promise.all([
@@ -144,7 +145,7 @@ Deno.serve(async(req:Request)=>{
       source_label:"SPED — Central de Balanços",source_url:pdfUrl,source_kind:"PRIMARY_OFFICIAL",
       document_type:type,publisher:"Sistema Público de Escrituração Digital (SPED)",source_date:publicationDate,
       retrieved_at:new Date().toISOString(),evidence_hash:await sha256(dedupe+"|"+cnpj+"|"+publicationDate),
-      dedupe_key:dedupe,reliability_weight:1,raw_reference:"document_id="+id,
+      dedupe_key:leadId+":"+dedupe,reliability_weight:1,raw_reference:"document_id="+id,
       excerpt:[type,title,desc,(d as any).origem?"Origem: "+(d as any).origem:null].filter(Boolean).join(" | ").slice(0,1800),
       verification_status:"VERIFIED",last_verified_at:new Date().toISOString(),usage_scope:"MENTIONABLE",created_by:user.id
     });
@@ -170,7 +171,7 @@ Deno.serve(async(req:Request)=>{
       organization_id:orgId,lead_id:leadId,company_id:companyId,event_type:eventType(d),event_date:safeDate((d as any).dataPublicacao),
       title:title+" publicado na Central de Balanços",
       description:"A fonte oficial confirma a publicação deste documento. O MAX não infere lucro, dividendos, caixa, patrimônio ou liquidez pessoal sem conteúdo explícito que sustente a conclusão.",
-      classification:"FACT",confidence:"HIGH",status:"VERIFIED",
+      classification:"FACT",confidence:"HIGH",status:"PENDING",
       metadata:{source_dedupe_key:key,central_balancos_document_id:id,document_type:type,origin:(d as any).origem||null,category:(d as any).categoria||null,content_amount_confirmed:false},
       created_by:user.id
     });
@@ -187,10 +188,15 @@ Deno.serve(async(req:Request)=>{
   const links=[];
   for(const d of unique){
     const key="central_balancos:"+String((d as any).id);
-    const evidenceId=evidenceByKey.get(key),eventId=existingKeys.get(key);
+    const evidenceId=evidenceByKey.get(leadId+":"+key),eventId=existingKeys.get(key);
     if(evidenceId&&eventId) links.push({organization_id:orgId,event_id:eventId,evidence_id:evidenceId,support_type:"SUPPORTS",strength:1});
   }
-  if(links.length) await admin.from("event_evidence").upsert(links,{onConflict:"event_id,evidence_id"});
+  if(links.length){
+    const linkRes=await admin.from("event_evidence").upsert(links,{onConflict:"event_id,evidence_id"});
+    if(linkRes.error) return new Response(JSON.stringify({error:"Event evidence persistence failed",detail:linkRes.error.message}),{status:500,headers:H});
+    const verifiedIds=[...new Set(links.map((x:any)=>x.event_id))];
+    if(verifiedIds.length) await admin.from("events").update({status:"VERIFIED"}).in("id",verifiedIds).neq("status","CONTRADICTED");
+  }
 
   const now=new Date().toISOString();
   await Promise.all([
@@ -214,3 +220,5 @@ Deno.serve(async(req:Request)=>{
     documents_processed:unique.length,persisted:evidence.length,new_events:insertedEvents.length,truncated:totalCount>unique.length
   }),{headers:H});
 });
+
+

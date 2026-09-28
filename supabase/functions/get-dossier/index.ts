@@ -37,6 +37,19 @@ Deno.serve(async(req:Request)=>{
     admin.from("identity_source_attempts").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).limit(100)
   ]);
 
+  // Older connectors stored a source document once per organization. Include documents
+  // referenced by this dossier even if their original lead_id belongs to another nucleus.
+  const referencedEvidenceIds=[...new Set([
+    ...(claims.data||[]).flatMap((r:any)=>(r.claim_evidence||[]).map((x:any)=>x.evidence_id)),
+    ...(events.data||[]).flatMap((r:any)=>(r.event_evidence||[]).map((x:any)=>x.evidence_id)),
+    ...(relationships.data||[]).flatMap((r:any)=>(r.relationship_evidence||[]).map((x:any)=>x.evidence_id))
+  ])];
+  const missingIds=referencedEvidenceIds.filter(id=>!(evidence.data||[]).some(e=>e.id===id));
+  if(missingIds.length){
+    const extra=await admin.from('evidence').select('*').eq('organization_id',orgId).in('id',missingIds);
+    if(extra.error)return new Response(JSON.stringify({error:extra.error.message}),{status:500,headers:H});
+    evidence.data=[...(evidence.data||[]),...(extra.data||[])];
+  }
   const personIds=[...new Set((relationships.data||[]).flatMap((r:any)=>[
     r.from_entity_type==="PERSON"?r.from_entity_id:null,
     r.to_entity_type==="PERSON"?r.to_entity_id:null
@@ -77,5 +90,4 @@ Deno.serve(async(req:Request)=>{
     divergences:divergences.data||[],identity_assessments:identityAssessments.data||[],identity_audit:identityAudit.data||[],identity_source_attempts:identitySourceAttempts.data||[],coverage:coverage.data||null,source_coverage:sourceCoverage
   }),{headers:H});
 });
-
 
