@@ -8,7 +8,8 @@ export function buildCommercialBrief(d:Row) {
  const events:Row[]=(d.events||[]).filter((e:Row)=>e.status==='VERIFIED'&&refs(e,'event_evidence').length);
  const rels:Row[]=(d.relationships||[]).filter((r:Row)=>r.status==='VERIFIED'&&refs(r,'relationship_evidence').length);
  const linked:Row[]=(d.companies||[]).filter((c:Row)=>c.link_status!=='REJECTED');
- const companies=[...new Map<string,Row>([...linked,...(d.extra_companies||[])].map((c:Row)=>[c.id,c] as [string,Row])).values()];
+ const rejected=new Set((d.companies||[]).filter((c:Row)=>c.link_status==='REJECTED').map((c:Row)=>c.id));
+ const companies=[...new Map<string,Row>([...(d.extra_companies||[]).filter((c:Row)=>!rejected.has(c.id)),...linked].map((c:Row)=>[c.id,c] as [string,Row])).values()];
  const topics:BriefTopic[]=[];
  const combine=(rows:Row[],key:string)=>[...new Set(rows.flatMap(r=>refs(r,key)))];
  for(const company of companies){

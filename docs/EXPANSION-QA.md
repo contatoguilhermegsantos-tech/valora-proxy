@@ -13,7 +13,7 @@
 
 ## QA
 
-- 13 testes unitários aprovados: identidade, recuperação de CNPJ, não atribuição de CNPJ a pessoa, isolamento de identificadores, exclusão de suporte rejeitado/contradito.
+- 14 testes unitários aprovados: identidade, recuperação de CNPJ, não atribuição de CNPJ a pessoa, isolamento de identificadores, exclusão de suporte rejeitado/contradito.
 - API real: duas expansões concorrentes retornaram o mesmo lead com CNPJ e pesquisa automática.
 - Empresa investigada: dez fatos e oito relações QSA. Consultas profundas executadas; ausência de achados ou cobertura continua explícita.
 - Reabertura reutiliza o núcleo sem repetir uma pesquisa já materializada.
@@ -26,4 +26,5 @@
 ## Limitações
 
 Esta entrega não ativa fontes dependentes de credenciais e não interpreta automaticamente o conteúdo completo de balanços. A camada comercial é baseada em regras e documentos disponíveis; perguntas de descoberta não são oportunidades financeiras comprovadas. Dados públicos podem continuar insuficientes para faturamento, margem, dívida atual, liquidez ou histórico completo. Personificação por homônimos permanece sujeita à resolução de identidade.
+
 

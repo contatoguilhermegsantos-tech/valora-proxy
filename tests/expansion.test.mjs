@@ -23,4 +23,9 @@ test('sinal com suporte contradito não entra na preparação comercial',()=>{
  const d={evidence:[{id:'e',verification_status:'VERIFIED'}],signals:[{title:'Teste',status:'ACTIVE',evidence_ids:['e'],claim_ids:['rejected'],event_ids:[]}]};
  assert.equal(buildCommercialBrief(d).topics.length,0);
 });
+test('empresa no grafo não perde o status do vínculo confirmado no resumo',()=>{
+ const d={companies:[{id:'c',link_status:'VERIFIED'}],extra_companies:[{id:'c'}]};
+ assert.equal(buildCommercialBrief(d).companies[0].link_status,'VERIFIED');
+ d.companies[0].link_status='REJECTED';assert.equal(buildCommercialBrief(d).companies.length,0);
+});
 
