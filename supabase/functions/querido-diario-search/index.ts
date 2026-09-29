@@ -1,11 +1,13 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { fetchSourceJson, selectTerritory, searchOutcome } from "../_shared/source-operations.ts";
 
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
 const norm=(v:string)=>(v||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
 const strip=(v:string)=>(v||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
-const digits=(v:string)=>(v||"").replace(/\D/g,"");
+const digits=(v:string)=>(v||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+const API="https://api.queridodiario.org.br";
 
 Deno.serve(async(req:Request)=>{
   if(req.method==="OPTIONS") return new Response("ok",{headers:H});
@@ -27,6 +29,8 @@ Deno.serve(async(req:Request)=>{
   const {data:p}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).single();
   const orgId=p?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
+  const {data:member}=await admin.from("organization_members").select("status,role").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
+  if(member?.status!=="ACTIVE"||member.role==="VIEWER")return new Response(JSON.stringify({error:"No research permission"}),{status:403,headers:H});
 
   const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   if(!lead) return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
@@ -34,31 +38,22 @@ Deno.serve(async(req:Request)=>{
   const {data:sourceRow}=await admin.from("source_registry").select("id").eq("key","querido_diario").single();
   const started=Date.now();
 
-  let cityCandidates:any[]=[];
-  try{
-    const q=encodeURIComponent(String(lead.city||"").trim());
-    if(q){
-      const cr=await fetch(`https://api.queridodiario.ok.org.br/cities?city_name=${q}`,{headers:{Accept:"application/json"}});
-      if(cr.ok){
-        const cj=await cr.json();
-        cityCandidates=Array.isArray(cj)?cj:(Array.isArray(cj?.cities)?cj.cities:[]);
-      }
-    }
-  }catch{}
-
-  const targetCity=norm(String(lead.city||""));
-  const targetState=String(lead.state||"").toUpperCase();
-  let city=cityCandidates.find((c:any)=>norm(String(c.territory_name||c.name||c.city_name||""))===targetCity && String(c.state_code||c.state||"").toUpperCase()===targetState)
-        || cityCandidates.find((c:any)=>norm(String(c.territory_name||c.name||c.city_name||""))===targetCity)
-        || cityCandidates[0];
-
+  async function stop(result:string,note:string,httpStatus:number|null=null,responseStatus=200){
+    await admin.from("source_fetch_logs").insert({organization_id:orgId,source_registry_id:sourceRow?.id,endpoint_reference:API+"/cities",success:result==="CITY_NOT_COVERED_CONFIRMED",http_status:httpStatus,result_status:result,error_summary:note,duration_ms:Date.now()-started,created_by:user.id});
+    return new Response(JSON.stringify({ok:responseStatus===200,status:result,territory_found:false,results:[],note}),{status:responseStatus,headers:H});
+  }
+  if(!String(lead.city||"").trim())return stop("CITY_REQUIRED","Informe o município para consultar os diários locais.");
+  const cities=await fetchSourceJson(API+"/cities?city_name="+encodeURIComponent(String(lead.city).trim()),v=>Array.isArray(v)||Array.isArray(v?.cities));
+  if(!cities.ok)return stop("CITY_LOOKUP_FAILED","Consulta de municípios indisponível: "+cities.error,cities.status,502);
+  const selected=selectTerritory(Array.isArray(cities.data)?cities.data:cities.data.cities,String(lead.city),String(lead.state||""));
+  if(selected.ambiguous)return stop("CITY_AMBIGUOUS","Município ambíguo; informe a UF.",cities.status);
+  const city=selected.city;
   const territoryId=String(city?.territory_id||city?.id||"");
   if(!territoryId){
-    await admin.from("source_fetch_logs").insert({organization_id:orgId,source_registry_id:sourceRow?.id,endpoint_reference:"api.queridodiario.ok.org.br/cities",success:false,result_status:"CITY_NOT_COVERED",error_summary:"Município não encontrado/coberto no Querido Diário",duration_ms:Date.now()-started,created_by:user.id});
-    return new Response(JSON.stringify({ok:true,territory_found:false,results:[],note:"Município não encontrado na cobertura do Querido Diário."}),{headers:H});
+    return stop("CITY_NOT_COVERED_CONFIRMED","Município/UF não encontrado na resposta válida de cobertura do Querido Diário.",cities.status);
   }
 
-  const {data:links}=await admin.from("lead_company_links").select("company_id,companies(cnpj,legal_name,trade_name)").eq("lead_id",leadId).eq("organization_id",orgId);
+  const {data:links}=await admin.from("lead_company_links").select("company_id,companies(cnpj,legal_name,trade_name)").eq("lead_id",leadId).eq("organization_id",orgId).neq("status","REJECTED");
   const terms:string[]=[];
   if(lead.name) terms.push(String(lead.name).trim());
   for(const l of links||[]){
@@ -72,6 +67,8 @@ Deno.serve(async(req:Request)=>{
   const uniq=[...new Map(terms.filter(x=>x.length>=4).map(x=>[norm(x),x])).values()].slice(0,4);
   const persisted:any[]=[];
   const seen=new Set<string>();
+  if(!uniq.length)return stop("NO_SEARCH_TERMS","Não há termos suficientes para a pesquisa.",cities.status);
+  let completed=0,failed=0,lastHttp:number|null=null;
 
   for(const term of uniq){
     try{
@@ -82,10 +79,10 @@ Deno.serve(async(req:Request)=>{
         number_of_excerpts:"3",
         size:String(Math.min(maxResults,10))
       });
-      const rr=await fetch(`https://api.queridodiario.ok.org.br/gazettes?${qs.toString()}`,{headers:{Accept:"application/json"}});
-      if(!rr.ok) continue;
-      const jj=await rr.json();
-      const gazettes=Array.isArray(jj?.gazettes)?jj.gazettes:[];
+      const rr=await fetchSourceJson(`${API}/gazettes?${qs.toString()}`,v=>Array.isArray(v?.gazettes));
+      lastHttp=rr.status;
+      if(!rr.ok){failed++;continue;}
+      const gazettes=rr.data.gazettes;
       for(const g of gazettes){
         const srcUrl=String(g.url||g.file_url||g.source_url||"");
         const date=String(g.date||g.published_at||"").slice(0,10)||null;
@@ -120,10 +117,15 @@ Deno.serve(async(req:Request)=>{
           usage_scope:"INTERNAL",
           created_by:user.id
         };
-        const {data:ev,error}=await admin.from("evidence").upsert(payload,{onConflict:"organization_id,dedupe_key"}).select("id,title,source_url,source_date,excerpt,verification_status").single();
-        if(!error && ev) persisted.push({...ev,query:term,territory_id:territoryId});
+        // Insert-only conflict handling preserves reviewed evidence even during concurrent re-search.
+        const {error}=await admin.from("evidence").upsert(payload,{onConflict:"organization_id,dedupe_key",ignoreDuplicates:true});
+        if(error)throw error;
+        const {data:ev,error:readError}=await admin.from("evidence").select("id,title,source_url,source_date,excerpt,verification_status").eq("organization_id",orgId).eq("dedupe_key",payload.dedupe_key).single();
+        if(readError)throw readError;
+        if(ev && !["REJECTED","CONTRADICTED"].includes(ev.verification_status))persisted.push({...ev,query:term,territory_id:territoryId});
       }
-    }catch{}
+      completed++;
+    }catch{failed++;}
   }
 
   if(persisted.length){
@@ -135,21 +137,21 @@ Deno.serve(async(req:Request)=>{
     });
   }
 
+  const outcome=searchOutcome(completed,failed,persisted.length);
   await admin.from("source_fetch_logs").insert({
     organization_id:orgId,source_registry_id:sourceRow?.id,
-    endpoint_reference:"api.queridodiario.ok.org.br/gazettes",
-    success:true,http_status:200,result_status:persisted.length?"MENTIONS_FOUND":"NO_MENTIONS",
+    endpoint_reference:API+"/gazettes",
+    success:failed===0,http_status:lastHttp,result_status:outcome,
+    error_summary:failed?`${failed} consulta(s) não concluída(s); não interpretar como ausência de menções.`:null,
     duration_ms:Date.now()-started,created_by:user.id
   });
 
   return new Response(JSON.stringify({
-    ok:true,territory_found:true,territory_id:territoryId,
+    ok:completed>0,status:outcome,queries_completed:completed,queries_failed:failed,territory_found:true,territory_id:territoryId,
     territory_name:city?.territory_name||lead.city,
     terms_searched:uniq,
     mentions_found:persisted.length,
     evidence:persisted,
     caveat:"Menção em diário municipal é evidência de publicação, não prova por si só relação econômica, pagamento, parentesco ou patrimônio."
-  }),{headers:H});
+  }),{status:completed?200:502,headers:H});
 });
-
-

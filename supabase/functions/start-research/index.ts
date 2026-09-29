@@ -211,10 +211,10 @@ Deno.serve(async(req:Request)=>{
    const {resp,data}=await callFn(url,auth,"querido-diario-search",{lead_id:leadId,max_results:10,research_run_id:run.id});
    if(resp.ok){
     const found=Number(data?.mentions_found||0);
-    await setStep("municipal_gazettes",found>0?"COMPLETED":"PARTIAL",
-      found>0?found+" menção(ões) localizada(s) em Diários Oficiais municipais.":(data?.territory_found===false?"Município não está coberto/localizado no Querido Diário.":"Nenhuma menção encontrada na cobertura municipal consultada; isso não prova inexistência."),
+    await setStep("municipal_gazettes",found>0&&data?.status!=="PARTIAL"?"COMPLETED":"PARTIAL",
+      data?.status==="PARTIAL"?"Consulta incompleta; resultados parciais preservados. Não interpretar como ausência de menções.":found>0?found+" menção(ões) localizada(s) em Diários Oficiais municipais.":(data?.note||"Nenhuma menção encontrada na cobertura municipal consultada; isso não prova inexistência."),
       undefined,{territory_id:data?.territory_id||null,mentions_found:found,terms_searched:data?.terms_searched||[]});
-   }else await setStep("municipal_gazettes","FAILED",undefined,data?.error||("HTTP "+resp.status));
+   }else await setStep("municipal_gazettes","FAILED",undefined,data?.error||data?.note||("HTTP "+resp.status));
   }
 
   if(strategy==="AGRO"){
@@ -356,4 +356,3 @@ Deno.serve(async(req:Request)=>{
   return new Response(JSON.stringify({error:"Research orchestration failed",detail:String(e),research_run_id:run.id}),{status:500,headers:H});
  }
 });
-
