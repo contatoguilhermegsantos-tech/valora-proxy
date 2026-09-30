@@ -20,3 +20,6 @@ Perfil empresarial por empresa com cadastro jurídico, operação, estrutura soc
 Branches/produção preservadas. Histórico completo de mudanças e revisão de expansão do grafo continuam como próximas entregas após o perfil empresarial.
 
 Consulta real de atualização BrasilAPI retornou 502 (fonte indisponível ou timeout), sem fabricar resultado. Rejeição/pêndencia/desatualização foram verificadas executando o handler com transporte controlado; consulta real bem-sucedida da nova atualização ainda pendente. Consulta unificada de logs de timeout falhou no backend do conector; janela de estabilidade continua não confirmada.
+
+
+Preview READY em 110a06a; seis áreas e dados reais conferidos no navegador, console sem erros. Cron das 23:00 e 23:10 UTC retornou 0 rows em ~20 ms, sem chamada ao worker.
