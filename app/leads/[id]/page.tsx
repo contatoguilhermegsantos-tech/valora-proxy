@@ -37,7 +37,7 @@ function LeadDossierContent(){
   const timer=setInterval(()=>{void load()},2500);
   return()=>clearInterval(timer);
  },[jobs,load])
- useEffect(()=>{if(!d)return;const seg=String(d.lead?.segment||'').toLowerCase();setStrategy(/agro|rural|fazenda|pecu|agric/.test(seg)?'AGRO':/medic|saude|saúde|clinic|hospital/.test(seg)?'MEDICO':d.lead?.kind==='COMPANY'?'EMPRESARIO':'GENERICO');setCnpj(d.lead?.initial_cnpj||'')},[d])
+ useEffect(()=>{if(!d)return;const seg=String(d.lead?.segment||'').toLowerCase();setStrategy(/agro|rural|fazenda|pecu|agric/.test(seg)?'AGRO':/medic|saude|saúde|clinic|hospital/.test(seg)?'MEDICO':d.lead?.kind==='COMPANY'?'EMPRESARIO':'GENERICO');setCnpj(d.lead?.initial_cnpj||'')},[d?.lead?.id,d?.lead?.initial_cnpj,d?.lead?.segment,d?.lead?.kind])
  const evidenceMap=useMemo(()=>new Map((d?.evidence||[]).map((e:any)=>[e.id,e])),[d])
  if(!d)return <Shell><div className="page-loading">{msg||'Carregando dossiê…'}</div></Shell>
 

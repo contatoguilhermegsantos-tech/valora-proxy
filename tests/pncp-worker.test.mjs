@@ -1,3 +1,4 @@
+import {sourceBatches} from '../supabase/functions/_shared/source-batches.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,7 +27,7 @@ function database() {
 function handler(name,db,fetcher){
  const source=fs.readFileSync(new URL('../supabase/functions/'+name+'/index.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
  let serve;
- vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,{Deno:{env:{get:()=> 'https://test.supabase.co'},serve:fn=>{serve=fn}},createClient:()=>db,fetch:fetcher,fetchSourceJson:(url,valid)=>fetchSourceJson(url,valid,{fetcher,wait:async()=>{}}),advanceCoverage,Response,Request,URL,AbortSignal,Date,Map,Number,String,JSON,Math,setTimeout:fn=>{fn();return 0}});
+ vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,{Deno:{env:{get:()=> 'https://test.supabase.co'},serve:fn=>{serve=fn}},createClient:()=>db,fetch:fetcher,fetchSourceJson:(url,valid)=>fetchSourceJson(url,valid,{fetcher,wait:async()=>{}}),advanceCoverage,sourceBatches,Response,Request,URL,AbortSignal,Date,Map,Number,String,JSON,Math,setTimeout:fn=>{fn();return 0}});
  return body=>serve(new Request('https://test.supabase.co',{method:'POST',headers:{'X-MAX-SYNC-TOKEN':'test-only','Content-Type':'application/json'},body:JSON.stringify(body)}));
 }
 test('PNCP retoma a página não salva, mantém tamanho 100 e só conclui no fim',async()=>{
@@ -53,9 +54,9 @@ test('worker interrompido recupera lease; falha mantém checkpoint e incrementa 
  const worker=handler('pncp-backfill-step',db,async()=>{throw new TypeError('network')});
  const response=await worker({});assert.equal(response.status,502);assert.equal(item.next_page,6);assert.equal(item.status,'FAILED');assert.equal(item.attempts,1);
 });
-test('quatro falhas aguardam seis horas e depois retomam sem perder página',async()=>{
+test('quatro falhas permanecem terminais mesmo após seis horas',async()=>{
  const db=database(),item=db.tables.source_backfill_queue[0];Object.assign(item,{status:'FAILED',attempts:4,next_page:6,finished_at:new Date().toISOString()});let calls=0;
  const worker=handler('pncp-backfill-step',db,async()=>{calls++;return Response.json({status:'SUCCESS'})});
  assert.equal((await (await worker({})).json()).status,'IDLE');assert.equal(calls,0);
- item.finished_at='2026-01-01T00:00:00Z';assert.equal((await (await worker({})).json()).status,'DONE');assert.equal(calls,1);assert.equal(item.next_page,6);
+ item.finished_at='2026-01-01T00:00:00Z';assert.equal((await (await worker({})).json()).status,'IDLE');assert.equal(calls,0);assert.equal(item.next_page,6);assert.equal(item.attempts,4);
 });

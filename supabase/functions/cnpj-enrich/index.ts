@@ -2,6 +2,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+import { insertEvidenceOnce } from '../_shared/connector-policy.ts';
+
 const JSON_HEADERS = {"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, GET, OPTIONS"};
 const cnpjNorm = (v: unknown) => String(v ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 const isValidCnpj = (v: unknown) => {
@@ -56,7 +58,7 @@ Deno.serve(async (req: Request) => {
 
   let response: Response;
   try {
-    response = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`, { headers: { Accept: "application/json" } });
+    response = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`, { headers: { Accept: "application/json" },signal:AbortSignal.timeout(10000) });
   } catch {
     await admin.from("source_fetch_logs").insert({
       organization_id: orgId, source_registry_id: source?.id, success: false,
@@ -127,6 +129,12 @@ Deno.serve(async (req: Request) => {
   }
   // Never downgrade an existing VERIFIED/SUPPORTED link during a routine CNPJ refresh.
 
+  const baseEvidenceKey=`brasilapi:cnpj:${leadId}:${cnpj}:${normalized.status_date || "current"}`;
+  const {data:legacyReview,error:legacyError}=await admin.from("evidence").select("id,verification_status").eq("organization_id",orgId).eq("lead_id",leadId).eq("dedupe_key",baseEvidenceKey).maybeSingle();
+  if(legacyError)return new Response(JSON.stringify({error:"Could not load previous evidence review"}),{status:500,headers:JSON_HEADERS});
+  if(legacyReview&&legacyReview.verification_status!=="VERIFIED")return new Response(JSON.stringify({ok:true,status:"REVIEW_REQUIRED",company_id:company.id,evidence_id:legacyReview.id,claim_ids:[],relationship_ids:[],data:{cnpj}}),{headers:JSON_HEADERS});
+  const snapshot=JSON.stringify({...normalized,qsa:qsa.map((p:any)=>({name:p.name,role:p.role,identifier:p.identifier,partnership_start_date:p.partnership_start_date})),opening_date:raw.data_inicio_atividade,legal_nature:raw.natureza_juridica,secondary_activities:raw.cnaes_secundarios});
+  const fingerprint=[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(snapshot)))].map(n=>n.toString(16).padStart(2,"0")).join("");
   const evidencePayload = {
     organization_id: orgId, lead_id: leadId, company_id: company.id, source_registry_id: source?.id,
     title: `Cadastro CNPJ ${cnpj}`,
@@ -134,15 +142,16 @@ Deno.serve(async (req: Request) => {
     source_url: `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
     source_kind: "AGGREGATOR", document_type: "CNPJ_REGISTRY",
     publisher: "BrasilAPI / dados de origem RFB", retrieved_at: new Date().toISOString(),
-    dedupe_key: `brasilapi:cnpj:${leadId}:${cnpj}:${normalized.status_date || "current"}`,
+    dedupe_key: baseEvidenceKey+":"+fingerprint,evidence_hash:fingerprint,
     reliability_weight: 0.75, raw_reference: cnpj,
     excerpt: `Razão social: ${normalized.legal_name ?? "não informada"}; situação: ${normalized.registration_status ?? "não informada"}; município/UF: ${normalized.city ?? "?"}/${normalized.state ?? "?"}; CNAE: ${normalized.cnae_description ?? "não informado"}; QSA: ${qsa.map((x:any)=>x.name + (x.role ? " ("+x.role+")" : "")).join("; ") || "não informado"}.`,
     verification_status: "VERIFIED", last_verified_at: new Date().toISOString(),
     usage_scope: "INTERNAL", created_by: user.id
   };
 
-  const { data: evidence, error: evError } = await admin.from("evidence").upsert(evidencePayload, { onConflict: "organization_id,dedupe_key" }).select("id").single();
-  if (evError) return new Response(JSON.stringify({ error: "Could not persist evidence", detail: evError.message }), { status: 500, headers: JSON_HEADERS });
+  let evidence:any;
+  try{evidence=await insertEvidenceOnce(admin,evidencePayload)}catch{return new Response(JSON.stringify({error:"Could not persist evidence"}),{status:500,headers:JSON_HEADERS})}
+  if(evidence.verification_status!=='VERIFIED')return new Response(JSON.stringify({ok:true,status:"REVIEW_REQUIRED",company_id:company.id,evidence_id:evidence.id,claim_ids:[],relationship_ids:[],data:{cnpj},note:"Existing evidence review preserved; no facts generated"}),{headers:JSON_HEADERS});
 
   const facts = [
     ["CNPJ_OPENING", normalized.legal_name || cnpj, "opening_date", raw.data_inicio_atividade, raw.data_inicio_atividade],
@@ -286,7 +295,7 @@ Deno.serve(async (req: Request) => {
       await admin.from("event_evidence").upsert({
         organization_id:orgId,event_id:eventId,evidence_id:evidence.id,support_type:"SUPPORTS",strength:1
       }, { onConflict:"event_id,evidence_id" });
-      await admin.from("events").update({status:"VERIFIED"}).eq("id",eventId);
+      await admin.from("events").update({status:"VERIFIED"}).eq("id",eventId).not("status","in","(CONTRADICTED,REJECTED)");
     }
   }
 
@@ -310,4 +319,3 @@ Deno.serve(async (req: Request) => {
     claim_ids:claimIds,relationship_ids:relationshipIds,qsa_candidate_ids:qsaCandidateIds,event_id:eventId,data:safeNormalized
   }), { headers: JSON_HEADERS });
 });
-

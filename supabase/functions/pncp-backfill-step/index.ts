@@ -9,9 +9,7 @@ Deno.serve(async(req:Request)=>{
  // A killed worker may not run its catch block. Recover only after its execution deadline.
  const {error:recoveryError}=await admin.from("source_backfill_queue").update({status:"FAILED",last_error:"Worker lease expired; checkpoint retained",finished_at:new Date().toISOString()}).eq("source_key","pncp").eq("status","RUNNING").lt("started_at",new Date(Date.now()-10*60000).toISOString());
  if(recoveryError)return new Response(JSON.stringify({error:"Could not recover worker leases"}),{status:500,headers:H});
- // Four failures trigger a six-hour cooldown, not permanent abandonment of a daily gap.
- const {error:cooldownError}=await admin.from("source_backfill_queue").update({attempts:0}).eq("source_key","pncp").eq("status","FAILED").gte("attempts",4).lt("finished_at",new Date(Date.now()-6*3600000).toISOString());
- if(cooldownError)return new Response(JSON.stringify({error:"Could not recover cooled-down dates"}),{status:500,headers:H});
+ // Exhausted failures remain terminal until an operator explicitly resets attempts.
  const {data:item,error:selectionError}=await admin.from("source_backfill_queue").select("*").eq("source_key","pncp").in("status",["PENDING","FAILED"]).lt("attempts",4).order("target_date",{ascending:true}).limit(1).maybeSingle();
  if(selectionError)return new Response(JSON.stringify({error:"Could not read source queue"}),{status:500,headers:H});
  if(!item)return new Response(JSON.stringify({ok:true,status:"IDLE"}),{headers:H});

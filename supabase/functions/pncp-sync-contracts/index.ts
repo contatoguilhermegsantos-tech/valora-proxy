@@ -2,6 +2,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchSourceJson, advanceCoverage } from "../_shared/source-operations.ts";
+import { sourceBatches } from '../_shared/source-batches.ts';
 const H={"Content-Type":"application/json"};
 const digits=(v:unknown)=>String(v??"").replace(/\D/g,"");
 const toDate=(v:unknown)=>{const s=String(v??"").trim();return s&&s.length>=10?s.slice(0,10):null};
@@ -59,7 +60,12 @@ Deno.serve(async(req:Request)=>{
     const year=Number(r.anoContrato??r.ano??0)||null,seq=r.sequencialContrato??r.sequencial??null,sourceUrl=orgCnpj&&year&&seq?"https://pncp.gov.br/app/contratos/"+orgCnpj+"/"+year+"/"+seq:endpoint.toString();
     pageMap.set(control,{pncp_control_number:control,supplier_cnpj:supplier,supplier_name:String(r.nomeRazaoSocialFornecedor??r.fornecedor?.nome??"").trim()||null,public_body_cnpj:orgCnpj||null,public_body_name:orgName,administrative_unit:String(r.unidadeOrgao?.nomeUnidade??r.unidade?.nomeUnidade??r.nomeUnidade??"").trim()||null,object_text:String(r.objetoContrato??r.objeto??"").trim()||null,contract_number:String(r.numeroContratoEmpenho??r.numeroContrato??"").trim()||null,contract_year:year,contract_type:String(r.tipoContrato?.nome??r.tipoContratoNome??r.tipoContratoId??"").trim()||null,initial_value:num(r.valorInicial),global_value:num(r.valorGlobal),accumulated_value:num(r.valorAcumulado),signature_date:toDate(r.dataAssinatura),validity_start:toDate(r.dataVigenciaInicio),validity_end:toDate(r.dataVigenciaFim),pncp_publication_date:r.dataPublicacaoPncp??r.dataPublicacaoPNCP??null,pncp_update_date:r.dataAtualizacao??r.dataAtualizacaoGlobal??null,source_url:sourceUrl,raw_public_metadata:{categoriaProcessoNome:r.categoriaProcesso?.nome??r.categoriaProcessoNome??null,modalidadeNome:r.modalidadeNome??r.modalidade?.nome??null,numeroParcelas:r.numeroParcelas??null,valorParcela:num(r.valorParcela)},indexed_at:new Date().toISOString()});
    }
-   const payload=[...pageMap.values()];if(payload.length){const {error}=await admin.from("public_contract_index").upsert(payload,{onConflict:"pncp_control_number"});if(error){status=pagesFetched>1?"PARTIAL":"FAILED";errorSummary="Database batch upsert failed on page "+page+": "+error.message;break}recordsIndexed+=payload.length}
+   const payload=[...pageMap.values()];
+   for(const batch of sourceBatches(payload)){
+    const {error}=await admin.from("public_contract_index").upsert(batch,{onConflict:"pncp_control_number"});
+    if(error)throw new Error("Database batch upsert failed on page "+page);
+    recordsIndexed+=batch.length;
+   }
    const totalPages=Number(json?.totalPaginas??json?.total_pages??0),remaining=Number(json?.paginasRestantes??json?.remainingPages??0);
    finished=Boolean((totalPages&&page>=totalPages)||(!totalPages&&remaining===0&&rows.length<100));
    // Re-read the terminal page if interrupted before the worker commits DONE.

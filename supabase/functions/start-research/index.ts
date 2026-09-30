@@ -177,7 +177,9 @@ Deno.serve(async(req:Request)=>{
    await setStep("cnpj_qsa","RUNNING");
    const {resp,data}=await callFn(url,auth,"cnpj-enrich",{lead_id:leadId,cnpj});
    cnpjResult=data;
-   if(resp.ok&&data?.company_id){
+   if(resp.ok&&data?.status==="REVIEW_REQUIRED"){
+    await setStep("cnpj_qsa","BLOCKED","A evidência cadastral foi revisada e não está verificada. Nenhum fato ou vínculo foi restaurado automaticamente.",undefined,{evidence_id:data.evidence_id});
+   }else if(resp.ok&&data?.company_id){
     companyId=data.company_id;
     await setStep("cnpj_qsa","COMPLETED","Cadastro consultado. "+(data.relationship_ids?.length||0)+" relação(ões) de QSA persistida(s) com evidência.",undefined,{company_id:companyId,evidence_id:data.evidence_id});
     if(lead.kind==="COMPANY"){
