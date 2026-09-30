@@ -21,3 +21,8 @@ test('documento que contradiz um fato não sustenta preparação comercial',()=>
  const d={companies:[{id:'c'}],evidence:[{id:'e',verification_status:'VERIFIED'}],claims:[{id:'f',company_id:'c',status:'VERIFIED',classification:'FACT',predicate:'cnae',claim_evidence:[{evidence_id:'e',support_type:'CONTRADICTS'}]}]};
  assert.equal(buildCommercialBrief(d).facts.length,0);assert.equal(buildCommercialBrief(d).topics.length,0);
 });
+
+test('dossiê não reapresenta conclusão municipal antiga como ausência confirmada',()=>{
+ const d={research_runs:[{created_at:'2026-09-28',research_steps:[{source_key:'querido_diario',status:'PARTIAL',result_summary:'Município não está coberto/localizado no Querido Diário.'}]}]};
+ const g=buildCommercialBrief(d).gaps[0];assert.match(g.reason,/legado inconclusivo/);assert.equal(g.url,'https://api.queridodiario.org.br/docs');
+});
