@@ -241,7 +241,7 @@ Deno.serve(async(req:Request)=>{
     const def=defs.find(s=>s.key===step);
     if(!def)continue;
     const configuredSource:any=def.source?sourceMap.get(def.source):null;
-    if(def.source&&(!configuredSource||!["CONNECTED","CONNECTED_LIMITED"].includes(configuredSource.connection_status))){
+    if(!(step==="federal_transparency"&&Deno.env.get("PORTAL_TRANSPARENCIA_API_TOKEN"))&&def.source&&(!configuredSource||!["CONNECTED","CONNECTED_LIMITED"].includes(configuredSource.connection_status))){
       await setStep(step,"BLOCKED","Fonte "+(configuredSource?.name||def.source)+" ainda não está operacional para execução automática.",undefined,{source_status:configuredSource?.connection_status||"UNKNOWN",action_url:configuredSource?.action_url||null});
       continue;
     }
@@ -273,7 +273,7 @@ Deno.serve(async(req:Request)=>{
     }
     await setStep(step,"RUNNING");
     const {resp,data}=await callFn(url,auth,fn,{lead_id:leadId,company_id:companyId,research_run_id:run.id});
-    if(!resp.ok){await setStep(step,"FAILED",undefined,data?.error||("HTTP "+resp.status));continue}
+    if(!resp.ok){await setStep(step,resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});continue}
 
     if(step==="financial_filings"){
       const n=Number(data?.documents_found||0);
@@ -292,9 +292,9 @@ Deno.serve(async(req:Request)=>{
     if(step==="federal_transparency"){
       const contracts=Number(data?.contracts_found||0),ceis=Number(data?.ceis_found||0),cnep=Number(data?.cnep_found||0);
       const total=contracts+ceis+cnep;
-      await setStep(step,total>0?"COMPLETED":"PARTIAL",
+      await setStep(step,total>0&&data?.complete===true?"COMPLETED":"PARTIAL",
         total>0?contracts+" contrato(s), "+ceis+" registro(s) CEIS e "+cnep+" registro(s) CNEP localizados na fonte federal.":"Nenhum registro localizado nas consultas federais executadas; isso não prova inexistência fora da cobertura consultada.",
-        undefined,{contracts_found:contracts,ceis_found:ceis,cnep_found:cnep});
+        undefined,{contracts_found:contracts,ceis_found:ceis,cnep_found:cnep,complete:data?.complete===true});
     }
     if(step==="cvm_ipe"){
       const n=Number(data?.filings_found||0);
@@ -312,7 +312,14 @@ Deno.serve(async(req:Request)=>{
    for(const key of ["financial_filings","bndes_financing","public_contracts","federal_transparency","cvm","cvm_ipe"])if(defs.some(s=>s.key===key))await setStep(key,"BLOCKED",reason,undefined,{supported_company_count:supportedClusterCompanies.length});
   }
 
-  const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","querido_diario","bndes_financing"]);
+  if(defs.some(s=>s.key==="web_context")){
+   await setStep("web_context","RUNNING");
+   const {resp,data}=await callFn(url,auth,"web-context-search",{lead_id:leadId,research_run_id:run.id});
+   if(!resp.ok)await setStep("web_context",resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});
+   else await setStep("web_context",data?.status==="PARTIAL"?"PARTIAL":"COMPLETED","Contexto web consultado. Resultados são pistas para revisão, sem confirmação automática de fatos ou identidade.",undefined,{results_found:data?.results_found||0,status:data?.status});
+  }
+
+  const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","querido_diario","bndes_financing","web_search"]);
   for(const def of defs){
    if(!def.source||automated.has(def.source))continue;
    const src:any=sourceMap.get(def.source);

@@ -8,13 +8,13 @@ export function selectTerritory(candidates: any[], name: string, state: string) 
 }
 
 // Each request has a deadline. Retry transient failures once, never authentication or invalid JSON.
-export async function fetchSourceJson(url: string, valid: (value: any) => boolean, options: { fetcher?: typeof fetch; timeoutMs?: number; wait?: (ms: number) => Promise<void> } = {}) {
+export async function fetchSourceJson(url: string, valid: (value: any) => boolean, options: { fetcher?: typeof fetch; timeoutMs?: number; headers?: Record<string,string>; wait?: (ms: number) => Promise<void> } = {}) {
   const fetcher = options.fetcher || fetch;
   const wait = options.wait || ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let result: { ok: boolean; status: number | null; data: any; error: string | null } = { ok: false, status: null, data: null, error: 'NETWORK_ERROR' };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(options.timeoutMs || 8000) });
+      const response = await fetcher(url, { headers: { Accept: 'application/json', ...options.headers }, signal: AbortSignal.timeout(options.timeoutMs || 8000) });
       if (response.ok) {
         let data: any;
         try { data = await response.json(); } catch { return { ok: false, status: response.status, data: null, error: 'INVALID_RESPONSE' }; }
@@ -24,7 +24,8 @@ export async function fetchSourceJson(url: string, valid: (value: any) => boolea
       await response.body?.cancel();
       if (![408, 425, 429, 500, 502, 503, 504].includes(response.status)) return result;
       // Long rate limits belong to a later run; don't hold the caller or hammer the source.
-      const retryAfter = Number(response.headers.get('Retry-After') || 0);
+      const retryHeader = response.headers.get('Retry-After') || '0';
+      const retryAfter = /^\d+$/.test(retryHeader) ? Number(retryHeader) : Math.max(0,(Date.parse(retryHeader)-Date.now())/1000)||0;
       if (retryAfter > 2) return result;
       if (!attempt) await wait(Math.max(500, retryAfter * 1000));
     } catch (e) {

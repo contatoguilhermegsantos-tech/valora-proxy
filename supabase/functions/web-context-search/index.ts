@@ -1,6 +1,8 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { fetchSourceJson } from '../_shared/source-operations.ts';
+import { classifyWebResult } from '../_shared/connector-policy.ts';
 
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
 const norm=(v:any)=>String(v??"").trim();
@@ -9,12 +11,7 @@ function domainOf(u:string){
   try{return new URL(u).hostname.toLowerCase().replace(/^www\./,"")}catch{return ""}
 }
 function resultClass(domain:string,url:string,title:string){
-  if(domain==="gov.br"||domain.endsWith(".gov.br")) return "OFFICIAL_GOV";
-  if(/linkedin\.com/.test(domain)) return "PROFESSIONAL_PROFILE";
-  if(/(g1\.globo\.com|valor\.globo\.com|estadao\.com\.br|folha\.uol\.com\.br|exame\.com|reuters\.com|bloomberg\.com)/.test(domain)) return "NEWS_OR_MEDIA";
-  if(/(facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com)/.test(domain)) return "WEB_CANDIDATE";
-  if(/empresa|institucional|quem somos|about|grupo|holding/i.test(title+" "+url)) return "CORPORATE_CANDIDATE";
-  return "WEB_CANDIDATE";
+  return classifyWebResult(domain,url,title);
 }
 
 Deno.serve(async(req:Request)=>{
@@ -41,6 +38,7 @@ Deno.serve(async(req:Request)=>{
   if(m.role==="VIEWER")return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
   const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   if(!lead)return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
+  if(runId){const {data:run}=await admin.from('research_runs').select('id').eq('id',runId).eq('organization_id',orgId).eq('lead_id',leadId).maybeSingle();if(!run)return new Response(JSON.stringify({error:'Research run not found'}),{status:404,headers:H});}
 
   if(!apiKey){
     return new Response(JSON.stringify({
@@ -65,6 +63,7 @@ Deno.serve(async(req:Request)=>{
   const uniqueQueries=[...new Set(queries.filter(Boolean))].slice(0,3);
   const collected:any[]=[];
   const errors:any[]=[];
+  let completed=0;const started=Date.now();
 
   for(const q of uniqueQueries){
     try{
@@ -73,13 +72,12 @@ Deno.serve(async(req:Request)=>{
       endpoint.searchParams.set("count","10");
       endpoint.searchParams.set("country","BR");
       endpoint.searchParams.set("search_lang","pt-br");
-      const rr=await fetch(endpoint,{signal:AbortSignal.timeout(12000),headers:{Accept:"application/json","X-Subscription-Token":apiKey},signal:AbortSignal.timeout(12000)});
-      const txt=await rr.text();let data:any=null;
-      try{data=txt?JSON.parse(txt):null}catch{data={}}
-      if(!rr.ok){errors.push({query:q,status:rr.status,error:data?.message||data?.error||txt.slice(0,300)});continue}
+      const rr=await fetchSourceJson(endpoint.toString(),v=>Array.isArray(v?.web?.results),{headers:{'X-Subscription-Token':apiKey}});
+      if(!rr.ok){errors.push({status:rr.status,error:rr.error});continue}
+      const data=rr.data;completed++;
       const rows=Array.isArray(data?.web?.results)?data.web.results:[];
       rows.forEach((x:any,i:number)=>{
-        const resultUrl=norm(x.url);if(!resultUrl)return;
+        const resultUrl=norm(x.url);if(!resultUrl||!(resultUrl.startsWith("https://")||resultUrl.startsWith("http://")))return;
         const title=norm(x.title),domain=domainOf(resultUrl);
         collected.push({
           organization_id:orgId,lead_id:leadId,research_run_id:runId,provider:"BRAVE",
@@ -90,39 +88,43 @@ Deno.serve(async(req:Request)=>{
           created_by:user.id
         });
       });
-    }catch(e){errors.push({query:q,status:0,error:String(e)})}
+    }catch{errors.push({status:0,error:'QUERY_FAILED'})}
   }
 
   const deduped=[...new Map(collected.map(x=>[x.result_url,x])).values()].slice(0,50);
   const persisted:any[]=[];
   for(const row of deduped){
-    const {data,error}=await admin.from("web_context_hits").upsert(row,{onConflict:"organization_id,lead_id,result_url"}).select("id,result_url,result_domain,result_class,title,snippet").single();
-    if(!error&&data)persisted.push(data);
+    const {error}=await admin.from("web_context_hits").upsert(row,{onConflict:"organization_id,lead_id,result_url",ignoreDuplicates:true});
+    if(error){errors.push({status:0,error:'PERSIST_FAILED'});continue;}
+    const {data,error:readError}=await admin.from('web_context_hits').select('id,result_url,result_domain,result_class,title,snippet,validation_status').eq('organization_id',orgId).eq('lead_id',leadId).eq('result_url',row.result_url).single();
+    if(readError)errors.push({status:0,error:'READ_FAILED'});
+    else if(data?.validation_status!=='REJECTED')persisted.push(data);
   }
 
   const now=new Date().toISOString();
   const {data:source}=await admin.from("source_registry").select("id").eq("key","web_search").maybeSingle();
-  await Promise.all([
-    admin.from("source_registry").update({
+  const outcome=!completed?'FAILED':errors.length?'PARTIAL':persisted.length?'SUCCESS':'NO_MATCH';
+  const updates=await Promise.all([
+    ...(completed?[admin.from("source_registry").update({
       connection_status:"CONNECTED_LIMITED",last_checked_at:now,
       method:"Brave Search API — discovery layer; results persist as candidates, not confirmed facts.",
       limitations:"Search snippets and rankings are discovery signals only. A URL must be validated against the underlying page/source before supporting a FACT.",
-      updated_at:now()
-    }).eq("key","web_search"),
+      updated_at:now
+    }).eq("key","web_search")]:[]),
     admin.from("source_fetch_logs").insert({
       organization_id:orgId,research_run_id:runId,source_registry_id:source?.id||null,
       endpoint_reference:"api.search.brave.com/res/v1/web/search",
-      result_status:errors.length&&persisted.length?"PARTIAL":persisted.length?"SUCCESS":errors.length?"FAILED":"NO_MATCH",
+      result_status:outcome,
       http_status:errors.length&&persisted.length===0?Number(errors[0]?.status||0)||null:200,
-      success:errors.length===0||persisted.length>0,duration_ms:null,
+      success:errors.length===0,duration_ms:Date.now()-started,
       error_summary:errors.length?JSON.stringify(errors).slice(0,1800):null,created_by:user.id
     })
   ]);
+  if(updates.some(r=>r.error))return new Response(JSON.stringify({error:'Could not record source execution'}),{status:500,headers:H});
 
   return new Response(JSON.stringify({
-    ok:errors.length===0||persisted.length>0,provider:"BRAVE",queries:uniqueQueries,
+    ok:completed>0,status:outcome,provider:"BRAVE",queries:uniqueQueries,
     results_found:persisted.length,results:persisted.slice(0,30),errors,
     caveat:"Resultados de busca são candidatos contextuais. Nenhum snippet é promovido automaticamente a fato confirmado."
-  }),{status:errors.length&&persisted.length===0?502:200,headers:H});
+  }),{status:!completed?502:200,headers:H});
 });
-

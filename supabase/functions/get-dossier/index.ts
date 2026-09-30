@@ -20,10 +20,10 @@ Deno.serve(async(req:Request)=>{
   const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   if(!lead) return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
 
-  const [links,relationships,events,evidence,claims,signals,runs,candidates,questions,divergences,coverage,identityAssessments,identityAudit,identitySourceAttempts]=await Promise.all([
+  const [links,relationships,events,evidence,claims,signals,runs,candidates,questions,divergences,coverage,identityAssessments,identityAudit,identitySourceAttempts,webHits]=await Promise.all([
     admin.from("lead_company_links").select("*,companies(*)").eq("lead_id",leadId).eq("organization_id",orgId),
-    admin.from("relationships").select("*,relationship_evidence(evidence_id)").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at"),
-    admin.from("events").select("*,event_evidence(evidence_id)").eq("lead_id",leadId).eq("organization_id",orgId).order("event_date",{ascending:true,nullsFirst:false}),
+    admin.from("relationships").select("*,relationship_evidence(evidence_id,support_type)").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at"),
+    admin.from("events").select("*,event_evidence(evidence_id,support_type)").eq("lead_id",leadId).eq("organization_id",orgId).order("event_date",{ascending:true,nullsFirst:false}),
     admin.from("evidence").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("retrieved_at",{ascending:false}),
     admin.from("claims").select("*,claim_evidence(evidence_id,support_type,strength)").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
     admin.from("commercial_signals").select("*").eq("lead_id",leadId).eq("organization_id",orgId).eq("status","ACTIVE").order("created_at",{ascending:false}),
@@ -34,8 +34,11 @@ Deno.serve(async(req:Request)=>{
     admin.from("lead_evidence_coverage").select("*").eq("lead_id",leadId).eq("organization_id",orgId).maybeSingle(),
     admin.from("identity_assessments").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).limit(100),
     admin.from("identity_status_audit").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).limit(50),
-    admin.from("identity_source_attempts").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).limit(100)
+    admin.from("identity_source_attempts").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).limit(100),
+    admin.from("web_context_hits").select("id,result_url,title,snippet,result_domain,result_class,validation_status,created_at").eq("organization_id",orgId).eq("lead_id",leadId).neq("validation_status","REJECTED").order("created_at",{ascending:false}).limit(100)
   ]);
+
+  if(webHits.error)return new Response(JSON.stringify({error:"Could not load web discovery results"}),{status:500,headers:H});
 
   // Older connectors stored a source document once per organization. Include documents
   // referenced by this dossier even if their original lead_id belongs to another nucleus.
@@ -82,7 +85,7 @@ Deno.serve(async(req:Request)=>{
   };
 
   return new Response(JSON.stringify({
-    ok:true,role:membership.role,lead,
+    ok:true,role:membership.role,lead,web_context_hits:webHits.data||[],
     companies:(links.data||[]).map((l:any)=>({...l.companies,link_id:l.id,link_status:l.status,link_role:l.role_label})),
     people:people.data||[],extra_companies:extraCompanies.data||[],
     relationships:relationships.data||[],events:events.data||[],evidence:evidence.data||[],claims:claims.data||[],
@@ -90,4 +93,3 @@ Deno.serve(async(req:Request)=>{
     divergences:divergences.data||[],identity_assessments:identityAssessments.data||[],identity_audit:identityAudit.data||[],identity_source_attempts:identitySourceAttempts.data||[],coverage:coverage.data||null,source_coverage:sourceCoverage
   }),{headers:H});
 });
-

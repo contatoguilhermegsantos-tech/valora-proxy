@@ -3,7 +3,7 @@ export type BriefTopic = {title:string; basis:string; relevance:string; question
 export function buildCommercialBrief(d:Row) {
  const evidence:Row[]=d.evidence||[];
  const usable=new Set(evidence.filter(e=>e.verification_status==='VERIFIED').map(e=>e.id));
- const refs=(row:Row,key:string):string[]=>[...new Set<string>((row[key]||[]).map((x:Row)=>x.evidence_id).filter((id:string)=>usable.has(id)))];
+ const refs=(row:Row,key:string):string[]=>[...new Set<string>((row[key]||[]).filter((x:Row)=>!x.support_type||x.support_type==='SUPPORTS').map((x:Row)=>x.evidence_id).filter((id:string)=>usable.has(id)))];
  const facts:Row[]=(d.claims||[]).filter((c:Row)=>c.status==='VERIFIED'&&c.classification==='FACT'&&refs(c,'claim_evidence').length);
  const events:Row[]=(d.events||[]).filter((e:Row)=>e.status==='VERIFIED'&&refs(e,'event_evidence').length);
  const rels:Row[]=(d.relationships||[]).filter((r:Row)=>r.status==='VERIFIED'&&refs(r,'relationship_evidence').length);
@@ -32,4 +32,3 @@ export function buildCommercialBrief(d:Row) {
  const gaps:Row[]=(latest?.research_steps||[]).filter((s:Row)=>['BLOCKED','FAILED','PARTIAL','PENDING','RUNNING'].includes(s.status)&&s.source_key).map((s:Row)=>({title:s.title,status:s.status,reason:s.result_summary||s.error_summary||'Consulta ainda não concluída.',url:s.action_url}));
  return {facts,events,companies,topics,gaps,hasResearch:Boolean(latest),evidence,financialWarning:'Receita, margem, saldo devedor e liquidez atual precisam de documentação específica. Ausência nas fontes consultadas não demonstra ausência de atividade.'};
 }
-
