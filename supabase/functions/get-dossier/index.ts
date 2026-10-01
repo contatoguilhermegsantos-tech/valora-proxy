@@ -1,4 +1,5 @@
 
+import {buildSourceRoutes} from '../_shared/source-router.ts';
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, GET, OPTIONS"};
@@ -91,8 +92,11 @@ Deno.serve(async(req:Request)=>{
     blocked_sources:blockedSources
   };
 
+  const {data:registry,error:registryError}=await admin.from('source_registry').select('key,name,connection_status,action_url,limitations');
+  if(registryError)return new Response(JSON.stringify({error:'Could not load investigation source routes'}),{status:500,headers:H});
+  const sourceRoutes=buildSourceRoutes(registry||[],{kind:lead.kind,companyResolved:(links.data||[]).some((l:any)=>['SUPPORTED','VERIFIED'].includes(l.status)),braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')});
   return new Response(JSON.stringify({
-    ok:true,role:membership.role,lead,web_context_hits:webHits.data||[],intelligence_snapshots:history.data||[],relationship_reviews:reviewLog.data||[],graph_candidate_reviews:candidateReviewLog.data||[],
+    ok:true,role:membership.role,lead,source_routes:sourceRoutes,web_context_hits:webHits.data||[],intelligence_snapshots:history.data||[],relationship_reviews:reviewLog.data||[],graph_candidate_reviews:candidateReviewLog.data||[],
     companies:(links.data||[]).map((l:any)=>({...l.companies,link_id:l.id,link_status:l.status,link_role:l.role_label})),
     people:people.data||[],extra_companies:extraCompanies.data||[],
     relationships:relationships.data||[],events:events.data||[],evidence:evidence.data||[],claims:claims.data||[],

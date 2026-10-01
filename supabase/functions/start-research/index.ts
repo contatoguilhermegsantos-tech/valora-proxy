@@ -1,4 +1,5 @@
 import { resolveCompanyCnpj } from '../_shared/company-context.ts';
+import {buildSourceRoutes,runIndependent} from '../_shared/source-router.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -60,7 +61,7 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
 };
 
 async function callFn(url:string,auth:string,name:string,body:any){
- const resp=await fetch(url+"/functions/v1/"+name,{method:"POST",headers:{Authorization:auth,"Content-Type":"application/json"},body:JSON.stringify(body)});
+ const resp=await fetch(url+"/functions/v1/"+name,{method:"POST",headers:{Authorization:auth,"Content-Type":"application/json"},body:JSON.stringify(body),signal:AbortSignal.timeout(90000)});
  const text=await resp.text();
  let data:any=null;
  try{data=text?JSON.parse(text):null}catch{data={error:"Invalid JSON from "+name,raw:text.slice(0,300)}}
@@ -97,7 +98,8 @@ Deno.serve(async(req:Request)=>{
  let resolvedCnpj='';try{resolvedCnpj=resolveCompanyCnpj(lead,b.cnpj,contextLinks||[])}catch(e){return new Response(JSON.stringify({error:String((e as Error).message)}),{status:409,headers:H})}
  const cnpj=resolvedCnpj;
 
- const {data:sources}=await admin.from("source_registry").select("key,name,connection_status,action_url,limitations");
+ const {data:sources,error:sourcesError}=await admin.from("source_registry").select("key,name,connection_status,action_url,limitations");
+ if(sourcesError)return new Response(JSON.stringify({error:'Could not load source routing catalog'}),{status:500,headers:H});
  const sourceMap=new Map((sources||[]).map((s:any)=>[s.key,s]));
  const {data:run,error:runError}=await admin.from("research_runs").insert({
   organization_id:orgId,lead_id:leadId,strategy,objective:b.objective||"Qualificação profunda baseada em evidências",
@@ -106,16 +108,21 @@ Deno.serve(async(req:Request)=>{
  if(runError)return new Response(JSON.stringify({error:runError.message}),{status:500,headers:H});
 
  const defs=STRATEGIES[strategy];
- await admin.from("research_steps").insert(defs.map((s,i)=>{
+ const routes=buildSourceRoutes(sources||[],{kind:lead.kind,companyResolved:cnpjShape(cnpj),braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')});
+ const {error:insertStepsError}=await admin.from("research_steps").insert(defs.map((s,i)=>{
   const src:any=s.source?sourceMap.get(s.source):null;
-  return {organization_id:orgId,research_run_id:run.id,step_key:s.key,step_order:i+1,title:s.title,source_key:s.source||null,status:"PENDING",action_url:src?.action_url||null,metadata:src?{source_status:src.connection_status,limitations:src.limitations}:{}};
+  const route=routes.find(r=>r.steps.includes(s.key));
+  return {organization_id:orgId,research_run_id:run.id,step_key:s.key,step_order:i+1,title:s.title,source_key:s.source||null,status:"PENDING",action_url:src?.action_url||null,metadata:{...(src?{source_status:src.connection_status,limitations:src.limitations}:{}),...(route?{source_route:route}: {})}};
  }));
+ if(insertStepsError){await admin.from('research_runs').update({status:'FAILED',finished_at:new Date().toISOString(),counters:{fatal_error:'Could not persist research plan'}}).eq('id',run.id);return new Response(JSON.stringify({error:'Could not persist research plan',research_run_id:run.id}),{status:500,headers:H})}
 
  const setStep=async(key:string,status:string,summary?:string,error?:string,extra:any={})=>{
-  const patch:any={status,result_summary:summary||null,error_summary:error||null,metadata:extra};
+  const route=routes.find(r=>r.steps.includes(key));
+  const patch:any={status,result_summary:summary||null,error_summary:error||null,metadata:{...(route?{source_route:route}:{}),...extra}};
   if(status==="RUNNING")patch.started_at=new Date().toISOString();
   if(["COMPLETED","PARTIAL","BLOCKED","FAILED","SKIPPED"].includes(status))patch.finished_at=new Date().toISOString();
-  await admin.from("research_steps").update(patch).eq("research_run_id",run.id).eq("step_key",key);
+  const {error:stepError}=await admin.from("research_steps").update(patch).eq("research_run_id",run.id).eq("step_key",key);
+  if(stepError)throw new Error('Could not persist research progress: '+key);
  };
 
  try{
@@ -229,6 +236,7 @@ Deno.serve(async(req:Request)=>{
   }
 
   if(companyId){
+   routes.splice(0,routes.length,...buildSourceRoutes(sources||[],{kind:lead.kind,companyResolved:true,braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')}));
    const connected=[
     ["financial_filings","central-balancos-search"],
     ["bndes_financing","bndes-company-financing"],
@@ -239,17 +247,20 @@ Deno.serve(async(req:Request)=>{
    ] as const;
    let cvmFound:boolean|null=null;
 
-   for(const [step,fn] of connected){
+   const liveRoutes=buildSourceRoutes(sources||[],{kind:lead.kind,companyResolved:true,braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')});
+   const runConnected=async([step,defaultFn]:typeof connected[number])=>{
     const def=defs.find(s=>s.key===step);
-    if(!def)continue;
+    if(!def)return;
+    const route=liveRoutes.find(r=>r.steps.includes(step));
+    const fn=route?.selected||defaultFn;
     const configuredSource:any=def.source?sourceMap.get(def.source):null;
-    if(!(step==="federal_transparency"&&Deno.env.get("PORTAL_TRANSPARENCIA_API_TOKEN"))&&def.source&&(!configuredSource||!["CONNECTED","CONNECTED_LIMITED"].includes(configuredSource.connection_status))){
+    if(!route?.selected){
       await setStep(step,"BLOCKED","Fonte "+(configuredSource?.name||def.source)+" ainda não está operacional para execução automática.",undefined,{source_status:configuredSource?.connection_status||"UNKNOWN",action_url:configuredSource?.action_url||null});
-      continue;
+      return;
     }
     if(step==="cvm_ipe"&&cvmFound===false){
       await setStep(step,"SKIPPED","CNPJ não está no cadastro de companhias abertas consultado; IPE não é aplicável a este CNPJ.");
-      continue;
+      return;
     }
     if(step==="cvm_ipe"){
       await setStep(step,"RUNNING");
@@ -271,16 +282,16 @@ Deno.serve(async(req:Request)=>{
           : "Nenhum documento relevante localizado no recorte IPE consultado nos anos "+checkedYears.join(" e ")+"; isso não prova ausência de evento corporativo.";
         await setStep(step,status,summary,errors.length?errors.join(" | "):undefined,{filings_found:filings,years:checkedYears,successful_years:successes});
       }
-      continue;
+      return;
     }
     await setStep(step,"RUNNING");
     const {resp,data}=await callFn(url,auth,fn,{lead_id:leadId,company_id:companyId,research_run_id:run.id});
-    if(!resp.ok){await setStep(step,resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});continue}
+    if(!resp.ok){await setStep(step,resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});return}
 
-    if(data?.status==='REVIEW_REQUIRED'){await setStep(step,'BLOCKED','Documento aguarda revisão; nenhum fato foi restaurado.');continue}
+    if(data?.status==='REVIEW_REQUIRED'){await setStep(step,'BLOCKED','Documento aguarda revisão; nenhum fato foi restaurado.');return}
     if(step==="financial_filings"){
       const n=Number(data?.documents_found||0);
-      await setStep(step,n>0?"COMPLETED":"PARTIAL",
+      await setStep(step,n>0&&!data?.truncated?"COMPLETED":"PARTIAL",
         n>0?n+" documento(s) localizado(s) na Central de Balanços; metadados, evidências e eventos foram persistidos.":"Nenhum documento localizado na Central de Balanços para este CNPJ; isso não prova ausência de demonstrações ou atos.",
         undefined,{documents_found:n,documents_processed:data?.documents_processed||0,persisted:data?.persisted||0,truncated:Boolean(data?.truncated)});
     }
@@ -304,9 +315,16 @@ Deno.serve(async(req:Request)=>{
       await setStep(step,n>0?"COMPLETED":"PARTIAL",n>0?n+" documento(s)/evento(s) relevante(s) localizado(s) no índice oficial IPE/CVM.":"Nenhum documento relevante localizado no recorte IPE consultado; isso não prova ausência de evento corporativo.",undefined,{filings_found:n,years:data?.years||[]});
     }
     if(step==="cvm"){
-      cvmFound=Boolean(data?.found);
+      cvmFound=typeof data?.found==='boolean'?data.found:null;
       await setStep(step,"COMPLETED",data?.found?"Registro CVM localizado e persistido com evidência.":"CNPJ não localizado no cadastro de companhias abertas consultado; sem inferência além disso.",undefined,{found:data?.found});
     }
+   };
+   // Eligibility is a prerequisite, while the other company queries are independent.
+   await runIndependent(connected.filter(([step])=>step!=='cvm_ipe'),async item=>{
+    try{await runConnected(item)}catch(e){await setStep(item[0],'FAILED',undefined,'Consulta interrompida: '+String(e))}
+   });
+   if(defs.some(s=>s.key==='cvm_ipe')){
+    try{await runConnected(connected.find(([step])=>step==='cvm_ipe')!)}catch(e){await setStep('cvm_ipe','FAILED',undefined,'Consulta interrompida: '+String(e))}
    }
   }else{
    const reason=supportedClusterCompanies.length
@@ -316,18 +334,22 @@ Deno.serve(async(req:Request)=>{
   }
 
   if(defs.some(s=>s.key==="web_context")){
+   const webRoute=routes.find(r=>r.key==='web_context');
+   if(!webRoute?.selected){await setStep('web_context','BLOCKED','Busca web desativada: acesso não configurado. Nenhum resultado foi simulado.');}
+   else{
    await setStep("web_context","RUNNING");
    const {resp,data}=await callFn(url,auth,"web-context-search",{lead_id:leadId,research_run_id:run.id});
    if(!resp.ok)await setStep("web_context",resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});
    else await setStep("web_context",data?.status==="PARTIAL"?"PARTIAL":"COMPLETED","Contexto web consultado. Resultados são pistas para revisão, sem confirmação automática de fatos ou identidade.",undefined,{results_found:data?.results_found||0,status:data?.status});
+   }
   }
+  if(defs.some(s=>s.key==='family_validation'))await setStep('family_validation','BLOCKED','Validação familiar exige fontes independentes e revisão explícita. Sobrenome e localidade não confirmam parentesco.');
 
   const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","querido_diario","bndes_financing","web_search"]);
   for(const def of defs){
    if(!def.source||automated.has(def.source))continue;
    const src:any=sourceMap.get(def.source);
-   if(!src||!["CONNECTED","CONNECTED_LIMITED"].includes(src.connection_status))
-     await setStep(def.key,"BLOCKED","Fonte "+(src?.name||def.source)+" ainda exige pesquisa manual, credencial ou integração adicional. Nenhum resultado foi fabricado.",undefined,{source_status:src?.connection_status||"UNKNOWN",action_url:src?.action_url||null});
+   await setStep(def.key,"BLOCKED","Fonte "+(src?.name||def.source)+" ainda exige pesquisa manual, credencial ou integração adicional. Nenhum resultado foi fabricado.",undefined,{source_status:src?.connection_status||"UNKNOWN",action_url:src?.action_url||null});
   }
 
   if(defs.some(s=>s.key==="societies"||s.key==="relationships")){
@@ -358,7 +380,7 @@ Deno.serve(async(req:Request)=>{
   if(stepsError)throw stepsError;
   const statuses=(steps||[]).map((x:any)=>x.status);
   const counts={completed:statuses.filter((s:string)=>s==="COMPLETED").length,partial:statuses.filter((s:string)=>s==="PARTIAL").length,blocked:statuses.filter((s:string)=>s==="BLOCKED").length,failed:statuses.filter((s:string)=>s==="FAILED").length};
-  const finalStatus=counts.failed>0||counts.blocked>0||counts.partial>0?"PARTIAL":"COMPLETED";
+  const finalStatus=counts.failed>0||counts.blocked>0||counts.partial>0||statuses.some((s:string)=>['PENDING','RUNNING'].includes(s))?"PARTIAL":"COMPLETED";
   await admin.from("research_runs").update({status:finalStatus,finished_at:new Date().toISOString(),counters:counts}).eq("id",run.id);
   let historyCapture:any;
   try{const response=await fetch(url+'/functions/v1/capture-intelligence',{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({lead_id:leadId,research_run_id:run.id}),signal:AbortSignal.timeout(25000)});historyCapture=await response.json();}catch{historyCapture={ok:false,error:'History capture pending; retry from dossier'};}
