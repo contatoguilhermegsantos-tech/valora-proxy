@@ -1,3 +1,5 @@
+import {fetchSourceJson} from '../_shared/source-operations.ts';
+import {persistSourceEvidence} from '../_shared/source-evidence.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -33,11 +35,16 @@ Deno.serve(async(req:Request)=>{
   const {data:p}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).single();
   const orgId=p?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
+  const {data:membership}=await admin.from('organization_members').select('role,status').eq('organization_id',orgId).eq('user_id',user.id).maybeSingle();
+  if(membership?.status!=='ACTIVE'||membership.role==='VIEWER')return new Response(JSON.stringify({error:'Write access required'}),{status:403,headers:H});
 
   const {data:lead}=await admin.from("leads").select("id").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   const {data:company}=await admin.from("companies").select("id,cnpj,legal_name,trade_name").eq("id",companyId).eq("organization_id",orgId).maybeSingle();
   if(!lead||!company) return new Response(JSON.stringify({error:"Lead or company not found"}),{status:404,headers:H});
 
+  const {data:companyLink,error:linkError}=await admin.from('lead_company_links').select('status').eq('organization_id',orgId).eq('lead_id',leadId).eq('company_id',companyId).maybeSingle();
+  if(linkError)return new Response(JSON.stringify({error:'Could not validate company context'}),{status:500,headers:H});
+  if(!companyLink||!['SUPPORTED','VERIFIED'].includes(companyLink.status))return new Response(JSON.stringify({error:'Company attribution requires validation in this lead'}),{status:409,headers:H});
   const cnpj=cnpjNorm(company.cnpj);
   if(!cnpjShape(cnpj)) return new Response(JSON.stringify({error:"Company has no valid numeric/alphanumeric CNPJ"}),{status:400,headers:H});
 
@@ -45,25 +52,21 @@ Deno.serve(async(req:Request)=>{
   const started=Date.now();
   const all:any[]=[];
 
+  let completedResources=0,failedResources=0,truncated=false;
   for(const res of RESOURCES){
-    let records:any[]=[];
+    let records:any[]=[],successfulFormats=0,matched=false;
     for(const candidate of [cnpj,fmt(cnpj)]){
-      const endpoint="https://dadosabertos.bndes.gov.br/api/3/action/datastore_search";
-      try{
-        const rr=await fetch(endpoint,{
-          method:"POST",
-          headers:{"Content-Type":"application/json",Accept:"application/json","User-Agent":"MAX-Intelligence/1.0"},
-          body:JSON.stringify({resource_id:res.id,limit:100,filters:{[res.cnpjField]:candidate}})
-        });
-        if(!rr.ok) continue;
-        const jj=await rr.json();
-        const got=Array.isArray(jj?.result?.records)?jj.result.records:[];
-        if(got.length){records=got;break}
-      }catch{}
+      const result=await fetchSourceJson('https://dadosabertos.bndes.gov.br/api/3/action/datastore_search',v=>v?.success===true&&Array.isArray(v?.result?.records),{timeoutMs:8000,fetcher:(endpoint,options)=>fetch(endpoint,{...options,method:'POST',headers:{...options?.headers,'Content-Type':'application/json'},body:JSON.stringify({resource_id:res.id,limit:100,filters:{[res.cnpjField]:candidate}})})});
+      if(!result.ok)continue;successfulFormats++;
+      const got=result.data.result.records.filter((r:any)=>cnpjNorm(r[res.cnpjField])===cnpj);
+      if(got.length){records=got;matched=true;truncated ||= result.data.result.records.length>=100||Number(result.data.result.total)>100;break;}
     }
+    if(matched||successfulFormats===2)completedResources++;else failedResources++;
     for(const rec of records) all.push({...rec,__resource:res});
   }
 
+  if(!completedResources){await admin.from('source_fetch_logs').insert({organization_id:orgId,source_registry_id:sourceRow?.id,endpoint_reference:'dadosabertos.bndes.gov.br/api/3/action/datastore_search',success:false,result_status:'QUERY_FAILED',duration_ms:Date.now()-started,created_by:user.id});return new Response(JSON.stringify({error:'BNDES queries failed; absence not determined'}),{status:502,headers:H});}
+  const complete=failedResources===0&&!truncated;
   const persisted:any[]=[];
   for(const rec of all){
     const res=rec.__resource;
@@ -89,7 +92,7 @@ Deno.serve(async(req:Request)=>{
       project?`projeto: ${project}`:null
     ].filter(Boolean).join("; ")+".";
 
-    const {data:ev,error:evErr}=await admin.from("evidence").upsert({
+    const {data:ev,error:evErr}=await persistSourceEvidence(admin,{
       organization_id:orgId,lead_id:leadId,company_id:companyId,source_registry_id:sourceRow?.id,
       title:`Operação de financiamento BNDES — ${product}`,
       source_label:"BNDES — Operações de Financiamento",
@@ -107,8 +110,9 @@ Deno.serve(async(req:Request)=>{
       last_verified_at:new Date().toISOString(),
       usage_scope:"INTERNAL",
       created_by:user.id
-    },{onConflict:"organization_id,dedupe_key"}).select("id").single();
-    if(evErr||!ev) continue;
+    });
+    if(evErr||!ev)return new Response(JSON.stringify({error:'Evidence persistence failed'}),{status:500,headers:H});
+    if(ev.verification_status!=='VERIFIED')continue;
 
     const eventKey=`bndes:${digest}`;
     let {data:event}=await admin.from("events").select("id,status")
@@ -138,7 +142,7 @@ Deno.serve(async(req:Request)=>{
       await admin.from("event_evidence").upsert({
         organization_id:orgId,event_id:event.id,evidence_id:ev.id,support_type:"SUPPORTS",strength:1
       },{onConflict:"event_id,evidence_id"});
-      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).neq("status","CONTRADICTED");
+      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).not("status","in","(CONTRADICTED,REJECTED)");
     }
     persisted.push({evidence_id:ev.id,event_id:event?.id||null,date,product,contracted_value:contracted,disbursed_value:disbursed,situation});
   }
@@ -146,7 +150,7 @@ Deno.serve(async(req:Request)=>{
   await admin.from("source_fetch_logs").insert({
     organization_id:orgId,source_registry_id:sourceRow?.id,
     endpoint_reference:"dadosabertos.bndes.gov.br/api/3/action/datastore_search",
-    success:true,http_status:200,result_status:persisted.length?"OPERATIONS_FOUND":"NO_OPERATIONS",
+    success:true,http_status:200,result_status:!complete?'PARTIAL':persisted.length?"OPERATIONS_FOUND":"NO_OPERATIONS",
     duration_ms:Date.now()-started,created_by:user.id
   });
 
@@ -161,9 +165,8 @@ Deno.serve(async(req:Request)=>{
   }
 
   return new Response(JSON.stringify({
-    ok:true,cnpj,operations_found:persisted.length,operations:persisted,
+    ok:true,complete,failed_resources:failedResources,truncated,cnpj,operations_found:persisted.length,operations:persisted,
     caveat:"Operação publicada pelo BNDES confirma o financiamento divulgado, mas não o saldo devedor atual, caixa livre da empresa, patrimônio ou liquidez pessoal dos sócios."
   }),{headers:H});
 });
-
 

@@ -1,3 +1,4 @@
+import {persistSourceEvidence} from '../_shared/source-evidence.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -74,10 +75,15 @@ Deno.serve(async(req:Request)=>{
   const {data:p}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).single();
   const orgId=p?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
+  const {data:membership}=await admin.from('organization_members').select('role,status').eq('organization_id',orgId).eq('user_id',user.id).maybeSingle();
+  if(membership?.status!=='ACTIVE'||membership.role==='VIEWER')return new Response(JSON.stringify({error:'Write access required'}),{status:403,headers:H});
 
   const {data:lead}=await admin.from("leads").select("id").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   const {data:company}=await admin.from("companies").select("id,cnpj,legal_name,trade_name").eq("id",companyId).eq("organization_id",orgId).maybeSingle();
   if(!lead||!company) return new Response(JSON.stringify({error:"Lead or company not found"}),{status:404,headers:H});
+  const {data:companyLink,error:linkError}=await admin.from('lead_company_links').select('status').eq('organization_id',orgId).eq('lead_id',leadId).eq('company_id',companyId).maybeSingle();
+  if(linkError)return new Response(JSON.stringify({error:'Could not validate company context'}),{status:500,headers:H});
+  if(!companyLink||!['SUPPORTED','VERIFIED'].includes(companyLink.status))return new Response(JSON.stringify({error:'Company attribution requires validation in this lead'}),{status:409,headers:H});
   const cnpj=cnpjNorm(company.cnpj);
   if(!cnpjShape(cnpj)) return new Response(JSON.stringify({error:"Company has no valid numeric/alphanumeric CNPJ"}),{status:400,headers:H});
 
@@ -87,19 +93,20 @@ Deno.serve(async(req:Request)=>{
 
   const {data:sourceRow}=await admin.from("source_registry").select("id").eq("key","cvm_ipe").single();
   const started=Date.now();
-  const matches:any[]=[];
+  const matches:any[]=[];let completedYears=0;
 
   for(const year of years){
     try{
       const zipUrl=`https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/IPE/DADOS/ipe_cia_aberta_${year}.zip`;
-      const rr=await fetch(zipUrl,{headers:{Accept:"application/zip","User-Agent":"MAX-Intelligence/1.0"}});
+      const rr=await fetch(zipUrl,{headers:{Accept:"application/zip","User-Agent":"MAX-Intelligence/1.0"},signal:AbortSignal.timeout(25000)});
       if(!rr.ok) continue;
       const bytes=new Uint8Array(await rr.arrayBuffer());
       const files=unzipSync(bytes);
       const name=Object.keys(files).find(n=>/\.csv$/i.test(n))||Object.keys(files)[0];
       if(!name)continue;
       const text=new TextDecoder("windows-1252").decode(files[name]);
-      const rows=scanCsvForCnpj(text,cnpj);
+      if(!/^.*cnpj.*$/im.test(text.slice(0,4000).split(/\r?\n/)[0]))continue;
+      const rows=scanCsvForCnpj(text,cnpj);completedYears++;
       for(const row of rows){
         const keys=Object.keys(row);
         const cnpjKey=keys.find(k=>k.includes("cnpj"));
@@ -131,6 +138,8 @@ Deno.serve(async(req:Request)=>{
     }catch(e){console.error("IPE year",year,e)}
   }
 
+  if(!completedYears){await admin.from('source_fetch_logs').insert({organization_id:orgId,source_registry_id:sourceRow?.id,success:false,result_status:'QUERY_FAILED',duration_ms:Date.now()-started,created_by:user.id});return new Response(JSON.stringify({error:'CVM IPE dataset could not be read; absence not determined'}),{status:502,headers:H});}
+  const complete=completedYears===years.length&&matches.length<=80;
   const persisted:any[]=[];
   for(const m of matches.slice(0,80)){
     const rawRef=[m.year,m.category,m.type,m.species,m.subject,m.source_date,m.source_url].join("|");
@@ -144,7 +153,7 @@ Deno.serve(async(req:Request)=>{
       m.subject?`assunto: ${m.subject}`:null,
       m.source_date?`data: ${m.source_date}`:null
     ].filter(Boolean).join("; ")+".";
-    const {data:ev,error}=await admin.from("evidence").upsert({
+    const {data:ev,error}=await persistSourceEvidence(admin,{
       organization_id:orgId,lead_id:leadId,company_id:companyId,source_registry_id:sourceRow?.id,
       title:`CVM IPE — ${title}`,
       source_label:"CVM — Documentos Periódicos e Eventuais (IPE)",
@@ -154,8 +163,9 @@ Deno.serve(async(req:Request)=>{
       evidence_hash:digest,dedupe_key:`${leadId}:cvm_ipe:${digest}`,reliability_weight:1,
       raw_reference:rawRef,excerpt,verification_status:"VERIFIED",
       last_verified_at:new Date().toISOString(),usage_scope:"INTERNAL",created_by:user.id
-    },{onConflict:"organization_id,dedupe_key"}).select("id").single();
-    if(error||!ev)continue;
+    });
+    if(error||!ev)return new Response(JSON.stringify({error:"Evidence persistence failed"}),{status:500,headers:H});
+    if(ev.verification_status!=='VERIFIED')continue;
 
     const text=[m.category,m.type,m.species,m.subject].join(" ");
     let eventType="CVM_FILING";
@@ -182,7 +192,7 @@ Deno.serve(async(req:Request)=>{
     }
     if(event?.id){
       await admin.from("event_evidence").upsert({organization_id:orgId,event_id:event.id,evidence_id:ev.id,support_type:"SUPPORTS",strength:1},{onConflict:"event_id,evidence_id"});
-      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).neq("status","CONTRADICTED");
+      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).not("status","in","(CONTRADICTED,REJECTED)");
     }
     persisted.push({evidence_id:ev.id,event_id:event?.id||null,...m});
   }
@@ -190,14 +200,13 @@ Deno.serve(async(req:Request)=>{
   await admin.from("source_fetch_logs").insert({
     organization_id:orgId,source_registry_id:sourceRow?.id,
     endpoint_reference:"dados.cvm.gov.br/dados/CIA_ABERTA/DOC/IPE/DADOS/ipe_cia_aberta_{year}.zip",
-    success:true,http_status:200,result_status:persisted.length?"FILINGS_FOUND":"NO_RELEVANT_FILINGS",
+    success:true,http_status:200,result_status:!complete?'PARTIAL':persisted.length?"FILINGS_FOUND":"NO_RELEVANT_FILINGS",
     duration_ms:Date.now()-started,created_by:user.id
   });
 
   return new Response(JSON.stringify({
-    ok:true,cnpj,years,filings_found:persisted.length,filings:persisted.slice(0,10).map((x:any)=>({evidence_id:x.evidence_id,event_id:x.event_id,year:x.year,category:x.category,type:x.type,species:x.species,subject:x.subject,source_date:x.source_date,source_url:x.source_url,company_name:x.company_name})),
+    ok:true,complete,cnpj,years,filings_found:persisted.length,filings:persisted.slice(0,10).map((x:any)=>({evidence_id:x.evidence_id,event_id:x.event_id,year:x.year,category:x.category,type:x.type,species:x.species,subject:x.subject,source_date:x.source_date,source_url:x.source_url,company_name:x.company_name})),
     caveat:"O índice IPE confirma que o documento foi entregue à CVM. Valores de dividendos, M&A ou outros efeitos econômicos só podem ser tratados como fato quando estiverem explícitos no documento-fonte."
   }),{headers:H});
 });
-
 

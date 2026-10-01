@@ -255,17 +255,17 @@ Deno.serve(async(req:Request)=>{
       await setStep(step,"RUNNING");
       const y=new Date().getUTCFullYear();
       const checkedYears=[y,y-1];
-      let filings=0,successes=0;
+      let filings=0,successes=0,allComplete=true;
       const errors:string[]=[];
       for(const year of checkedYears){
         const one=await callFn(url,auth,fn,{lead_id:leadId,company_id:companyId,research_run_id:run.id,years:[year]});
-        if(one.resp.ok){filings+=Number(one.data?.filings_found||0);successes++}
+        if(one.resp.ok){filings+=Number(one.data?.filings_found||0);successes++;allComplete &&= one.data?.complete===true}
         else errors.push(year+": "+String(one.data?.error||("HTTP "+one.resp.status)));
       }
       if(successes===0){
         await setStep(step,"FAILED",undefined,errors.join(" | "));
       }else{
-        const status=filings>0?"COMPLETED":"PARTIAL";
+        const status=filings>0&&allComplete&&errors.length===0?"COMPLETED":"PARTIAL";
         const summary=filings>0
           ? filings+" documento(s)/evento(s) relevante(s) localizado(s) no índice oficial IPE/CVM nos anos "+checkedYears.join(" e ")+"."
           : "Nenhum documento relevante localizado no recorte IPE consultado nos anos "+checkedYears.join(" e ")+"; isso não prova ausência de evento corporativo.";
@@ -277,6 +277,7 @@ Deno.serve(async(req:Request)=>{
     const {resp,data}=await callFn(url,auth,fn,{lead_id:leadId,company_id:companyId,research_run_id:run.id});
     if(!resp.ok){await setStep(step,resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});continue}
 
+    if(data?.status==='REVIEW_REQUIRED'){await setStep(step,'BLOCKED','Documento aguarda revisão; nenhum fato foi restaurado.');continue}
     if(step==="financial_filings"){
       const n=Number(data?.documents_found||0);
       await setStep(step,n>0?"COMPLETED":"PARTIAL",
@@ -285,7 +286,7 @@ Deno.serve(async(req:Request)=>{
     }
     if(step==="bndes_financing"){
       const n=Number(data?.operations_found||0);
-      await setStep(step,n>0?"COMPLETED":"PARTIAL",n>0?n+" operação(ões) de financiamento BNDES localizada(s) e persistida(s) com evidência oficial.":"Nenhuma operação localizada nas bases consultadas do BNDES; isso não prova ausência de crédito por outras fontes.",undefined,{operations_found:n});
+      await setStep(step,n>0&&data?.complete===true?"COMPLETED":"PARTIAL",n>0?n+" operação(ões) de financiamento BNDES localizada(s) e persistida(s) com evidência oficial.":"Nenhuma operação localizada nas bases consultadas do BNDES; isso não prova ausência de crédito por outras fontes.",undefined,{operations_found:n});
     }
     if(step==="public_contracts"){
       const n=Number(data?.contracts_found||0);
@@ -359,7 +360,9 @@ Deno.serve(async(req:Request)=>{
   const counts={completed:statuses.filter((s:string)=>s==="COMPLETED").length,partial:statuses.filter((s:string)=>s==="PARTIAL").length,blocked:statuses.filter((s:string)=>s==="BLOCKED").length,failed:statuses.filter((s:string)=>s==="FAILED").length};
   const finalStatus=counts.failed>0||counts.blocked>0||counts.partial>0?"PARTIAL":"COMPLETED";
   await admin.from("research_runs").update({status:finalStatus,finished_at:new Date().toISOString(),counters:counts}).eq("id",run.id);
-  return new Response(JSON.stringify({ok:true,research_run_id:run.id,status:finalStatus,counters:counts,company_id:companyId,cnpj_result:cnpjResult,name_candidates:nameCandidates,supported_cluster_companies:supportedClusterCompanies}),{headers:H});
+  let historyCapture:any;
+  try{const response=await fetch(url+'/functions/v1/capture-intelligence',{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({lead_id:leadId,research_run_id:run.id}),signal:AbortSignal.timeout(25000)});historyCapture=await response.json();}catch{historyCapture={ok:false,error:'History capture pending; retry from dossier'};}
+  return new Response(JSON.stringify({ok:true,research_run_id:run.id,status:finalStatus,counters:counts,history_capture:historyCapture,company_id:companyId,cnpj_result:cnpjResult,name_candidates:nameCandidates,supported_cluster_companies:supportedClusterCompanies}),{headers:H});
  }catch(e){
   await admin.from("research_runs").update({status:"FAILED",finished_at:new Date().toISOString(),counters:{fatal_error:String(e)}}).eq("id",run.id);
   return new Response(JSON.stringify({error:"Research orchestration failed",detail:String(e),research_run_id:run.id}),{status:500,headers:H});

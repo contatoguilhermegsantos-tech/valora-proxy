@@ -38,7 +38,7 @@ Deno.serve(async(req:Request)=>{
     admin.from("web_context_hits").select("id,result_url,title,snippet,result_domain,result_class,validation_status,created_at").eq("organization_id",orgId).eq("lead_id",leadId).neq("validation_status","REJECTED").order("created_at",{ascending:false}).limit(100)
   ]);
 
-  if(webHits.error)return new Response(JSON.stringify({error:"Could not load web discovery results"}),{status:500,headers:H});
+  if([links,relationships,events,evidence,claims,signals,runs,candidates,questions,divergences,coverage,identityAssessments,identityAudit,identitySourceAttempts,webHits].some(result=>result.error))return new Response(JSON.stringify({error:"Could not load complete dossier; retry before comparing history"}),{status:500,headers:H});
 
   // Older connectors stored a source document once per organization. Include documents
   // referenced by this dossier even if their original lead_id belongs to another nucleus.
@@ -67,6 +67,13 @@ Deno.serve(async(req:Request)=>{
   ]);
 
   const latestRun=(runs.data||[])[0]||null;
+  if(people.error||extraCompanies.error)return new Response(JSON.stringify({error:"Could not load dossier entities"}),{status:500,headers:H});
+  const [history,reviewLog,candidateReviewLog]=b.include_history===false?[{data:[],error:null},{data:[],error:null},{data:[],error:null}]:await Promise.all([
+    admin.from('intelligence_snapshots').select('id,captured_at,research_run_id,payload').eq('organization_id',orgId).eq('lead_id',leadId).order('captured_at',{ascending:false}).limit(20),
+    admin.from('relationship_review_log').select('id,relationship_id,previous_status,new_status,reason,created_at').eq('organization_id',orgId).eq('lead_id',leadId).order('created_at',{ascending:false}).limit(50),
+    admin.from('graph_candidate_review_log').select('id,candidate_id,action,reason,created_at').eq('organization_id',orgId).eq('lead_id',leadId).order('created_at',{ascending:false}).limit(50)
+  ]);
+  if(history.error||reviewLog.error||candidateReviewLog.error)return new Response(JSON.stringify({error:'Could not load intelligence history'}),{status:500,headers:H});
   const latestSourceSteps=(latestRun?.research_steps||[]).filter((s:any)=>s.source_key);
   const relevantSources=[...new Set(latestSourceSteps.map((s:any)=>s.source_key))];
   const successfulSources=[...new Set(latestSourceSteps.filter((s:any)=>["COMPLETED","PARTIAL"].includes(s.status)).map((s:any)=>s.source_key))];
@@ -85,7 +92,7 @@ Deno.serve(async(req:Request)=>{
   };
 
   return new Response(JSON.stringify({
-    ok:true,role:membership.role,lead,web_context_hits:webHits.data||[],
+    ok:true,role:membership.role,lead,web_context_hits:webHits.data||[],intelligence_snapshots:history.data||[],relationship_reviews:reviewLog.data||[],graph_candidate_reviews:candidateReviewLog.data||[],
     companies:(links.data||[]).map((l:any)=>({...l.companies,link_id:l.id,link_status:l.status,link_role:l.role_label})),
     people:people.data||[],extra_companies:extraCompanies.data||[],
     relationships:relationships.data||[],events:events.data||[],evidence:evidence.data||[],claims:claims.data||[],

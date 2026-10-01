@@ -1,3 +1,4 @@
+import {sourceBatches} from '../_shared/source-batches.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -67,8 +68,8 @@ Deno.serve(async(req:Request)=>{
   const orgId=p?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
 
-  const {data:m}=await admin.from("organization_members").select("status").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
-  if(m?.status!=="ACTIVE") return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
+  const {data:m}=await admin.from("organization_members").select("status,role").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
+  if(m?.status!=="ACTIVE"||m.role==='VIEWER') return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
 
   const [{data:lead},{data:company},{data:source}]=await Promise.all([
     admin.from("leads").select("id,name").eq("id",leadId).eq("organization_id",orgId).maybeSingle(),
@@ -76,6 +77,9 @@ Deno.serve(async(req:Request)=>{
     admin.from("source_registry").select("id").eq("key","central_balancos_sped").maybeSingle()
   ]);
   if(!lead||!company) return new Response(JSON.stringify({error:"Lead or company not found"}),{status:404,headers:H});
+  const {data:companyLink,error:linkError}=await admin.from('lead_company_links').select('status').eq('organization_id',orgId).eq('lead_id',leadId).eq('company_id',companyId).maybeSingle();
+  if(linkError)return new Response(JSON.stringify({error:'Could not validate company context'}),{status:500,headers:H});
+  if(!companyLink||!['SUPPORTED','VERIFIED'].includes(companyLink.status))return new Response(JSON.stringify({error:'Company attribution requires validation in this lead'}),{status:409,headers:H});
   const cnpj=cnpjNorm(company.cnpj);
   if(!cnpjShape(cnpj)) return new Response(JSON.stringify({error:"Company has no valid numeric/alphanumeric CNPJ"}),{status:400,headers:H});
 
@@ -152,10 +156,12 @@ Deno.serve(async(req:Request)=>{
   }
 
   let evidence:any[]=[];
-  if(evidenceRows.length){
-    const er=await admin.from("evidence").upsert(evidenceRows,{onConflict:"organization_id,dedupe_key"}).select("id,dedupe_key");
-    if(er.error) return new Response(JSON.stringify({error:"Evidence persistence failed",detail:er.error.message}),{status:500,headers:H});
-    evidence=er.data||[];
+  for(const batch of sourceBatches(evidenceRows)){
+    const er=await admin.from('evidence').upsert(batch,{onConflict:'organization_id,dedupe_key',ignoreDuplicates:true});
+    if(er.error)return new Response(JSON.stringify({error:'Evidence persistence failed'}),{status:500,headers:H});
+    const read=await admin.from('evidence').select('id,dedupe_key,verification_status').eq('organization_id',orgId).eq('lead_id',leadId).in('dedupe_key',batch.map(e=>e.dedupe_key));
+    if(read.error)return new Response(JSON.stringify({error:'Could not load evidence review'}),{status:500,headers:H});
+    evidence.push(...(read.data||[]).filter(e=>e.verification_status==='VERIFIED'));
   }
   const evidenceByKey=new Map(evidence.map((x:any)=>[x.dedupe_key,x.id]));
 
@@ -178,10 +184,10 @@ Deno.serve(async(req:Request)=>{
   }
 
   let insertedEvents:any[]=[];
-  if(eventRows.length){
-    const ins=await admin.from("events").insert(eventRows).select("id,metadata");
+  for(const batch of sourceBatches(eventRows)){
+    const ins=await admin.from("events").insert(batch).select("id,metadata");
     if(ins.error) return new Response(JSON.stringify({error:"Event persistence failed",detail:ins.error.message}),{status:500,headers:H});
-    insertedEvents=ins.data||[];
+    insertedEvents.push(...(ins.data||[]));
   }
   for(const ev of insertedEvents) existingKeys.set(ev.metadata?.source_dedupe_key,ev.id);
 
@@ -192,10 +198,12 @@ Deno.serve(async(req:Request)=>{
     if(evidenceId&&eventId) links.push({organization_id:orgId,event_id:eventId,evidence_id:evidenceId,support_type:"SUPPORTS",strength:1});
   }
   if(links.length){
-    const linkRes=await admin.from("event_evidence").upsert(links,{onConflict:"event_id,evidence_id"});
+    for(const batch of sourceBatches(links)){
+    const linkRes=await admin.from("event_evidence").upsert(batch,{onConflict:"event_id,evidence_id"});
     if(linkRes.error) return new Response(JSON.stringify({error:"Event evidence persistence failed",detail:linkRes.error.message}),{status:500,headers:H});
+    }
     const verifiedIds=[...new Set(links.map((x:any)=>x.event_id))];
-    if(verifiedIds.length) await admin.from("events").update({status:"VERIFIED"}).in("id",verifiedIds).neq("status","CONTRADICTED");
+    if(verifiedIds.length) await admin.from("events").update({status:"VERIFIED"}).in("id",verifiedIds).not("status","in","(CONTRADICTED,REJECTED)");
   }
 
   const now=new Date().toISOString();
@@ -220,5 +228,4 @@ Deno.serve(async(req:Request)=>{
     documents_processed:unique.length,persisted:evidence.length,new_events:insertedEvents.length,truncated:totalCount>unique.length
   }),{headers:H});
 });
-
 

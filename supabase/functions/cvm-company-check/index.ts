@@ -1,3 +1,4 @@
+import {persistSourceEvidence} from '../_shared/source-evidence.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -50,10 +51,15 @@ Deno.serve(async(req:Request)=>{
   const {data:profile}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).single();
   const orgId=profile?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
+  const {data:membership}=await admin.from('organization_members').select('role,status').eq('organization_id',orgId).eq('user_id',user.id).maybeSingle();
+  if(membership?.status!=='ACTIVE'||membership.role==='VIEWER')return new Response(JSON.stringify({error:'Write access required'}),{status:403,headers:H});
 
   const {data:company}=await admin.from("companies").select("*").eq("id",companyId).eq("organization_id",orgId).maybeSingle();
   const {data:lead}=await admin.from("leads").select("id").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   if(!company||!lead) return new Response(JSON.stringify({error:"Lead or company not found"}),{status:404,headers:H});
+  const {data:companyLink,error:linkError}=await admin.from('lead_company_links').select('status').eq('organization_id',orgId).eq('lead_id',leadId).eq('company_id',companyId).maybeSingle();
+  if(linkError)return new Response(JSON.stringify({error:'Could not validate company context'}),{status:500,headers:H});
+  if(!companyLink||!['SUPPORTED','VERIFIED'].includes(companyLink.status))return new Response(JSON.stringify({error:'Company attribution requires validation in this lead'}),{status:409,headers:H});
   const cnpj=cnpjNorm(company.cnpj);
   if(!cnpjShape(cnpj)) return new Response(JSON.stringify({error:"Company has no valid numeric/alphanumeric CNPJ"}),{status:400,headers:H});
 
@@ -62,7 +68,7 @@ Deno.serve(async(req:Request)=>{
   const started=Date.now();
 
   let resp:Response;
-  try{resp=await fetch(sourceUrl,{headers:{Accept:"text/csv,*/*"}})}
+  try{resp=await fetch(sourceUrl,{headers:{Accept:"text/csv,*/*"},signal:AbortSignal.timeout(20000)})}
   catch(e){
     await admin.from("source_fetch_logs").insert({
       organization_id:orgId,source_registry_id:source?.id,endpoint_reference:sourceUrl,
@@ -85,6 +91,7 @@ Deno.serve(async(req:Request)=>{
   if(!lines.length) return new Response(JSON.stringify({error:"CVM dataset empty"}),{status:502,headers:H});
 
   const headers=parseCsvLine(lines[0]).map(x=>x.trim());
+  if(!headers.some(h=>['CNPJ_CIA','CNPJ','CNPJ_CIA_ABERTA'].includes(h)))return new Response(JSON.stringify({error:'CVM dataset schema invalid'}),{status:502,headers:H});
   let row:any=null;
   for(let i=1;i<lines.length;i++){
     const vals=parseCsvLine(lines[i]);
@@ -116,15 +123,17 @@ Deno.serve(async(req:Request)=>{
   const category=String(row.CATEG_REG||row.CATEGORIA_REGISTRO||"").trim()||null;
   const excerpt=`Companhia: ${denom}; situação CVM: ${status||"não informada"}; data de registro: ${regDate||"não informada"}; data de cancelamento: ${cancelDate||"não informada"}; categoria: ${category||"não informada"}.`;
 
-  const {data:evidence}=await admin.from("evidence").upsert({
+  const {data:evidence,error:evidenceError}=await persistSourceEvidence(admin,{
     organization_id:orgId,lead_id:leadId,company_id:companyId,source_registry_id:source?.id,
     title:`Cadastro CVM — ${denom}`,source_label:"Comissão de Valores Mobiliários (CVM)",
     source_url:sourceUrl,source_kind:"PRIMARY_OFFICIAL",document_type:"CVM_COMPANY_REGISTRY",
     publisher:"CVM",retrieved_at:new Date().toISOString(),dedupe_key:`${leadId}:cvm:cad_cia_aberta:${cnpj}`,
     reliability_weight:1,raw_reference:cnpj,excerpt,verification_status:"VERIFIED",
     last_verified_at:new Date().toISOString(),usage_scope:"INTERNAL",created_by:user.id
-  },{onConflict:"organization_id,dedupe_key"}).select("id").single();
+  });
 
+  if(evidenceError||!evidence)return new Response(JSON.stringify({error:'Evidence persistence failed'}),{status:500,headers:H});
+  if(evidence.verification_status!=='VERIFIED')return new Response(JSON.stringify({ok:true,status:'REVIEW_REQUIRED',found:true}),{headers:H});
   const claimIds:string[]=[];
   for(const [type,predicate,value] of [
     ["CVM_REGISTRATION","cvm_registration_status",status],
@@ -143,7 +152,7 @@ Deno.serve(async(req:Request)=>{
     }
     if(claim?.id){
       await admin.from("claim_evidence").upsert({organization_id:orgId,claim_id:claim.id,evidence_id:evidence.id,support_type:"SUPPORTS",strength:1},{onConflict:"claim_id,evidence_id"});
-      await admin.from("claims").update({status:"VERIFIED"}).eq("id",claim.id).neq("status","CONTRADICTED");
+      await admin.from("claims").update({status:"VERIFIED"}).eq("id",claim.id).not("status","in","(CONTRADICTED,REJECTED)");
       claimIds.push(claim.id);
     }
   }
@@ -162,7 +171,7 @@ Deno.serve(async(req:Request)=>{
     }
     if(event?.id){
       await admin.from("event_evidence").upsert({organization_id:orgId,event_id:event.id,evidence_id:evidence.id,support_type:"SUPPORTS",strength:1},{onConflict:"event_id,evidence_id"});
-      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id);
+      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).not("status","in","(CONTRADICTED,REJECTED)");
       eventIds.push(event.id);
     }
   }
@@ -179,12 +188,11 @@ Deno.serve(async(req:Request)=>{
     }
     if(event?.id){
       await admin.from("event_evidence").upsert({organization_id:orgId,event_id:event.id,evidence_id:evidence.id,support_type:"SUPPORTS",strength:1},{onConflict:"event_id,evidence_id"});
-      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id);
+      await admin.from("events").update({status:"VERIFIED"}).eq("id",event.id).not("status","in","(CONTRADICTED,REJECTED)");
       eventIds.push(event.id);
     }
   }
 
   return new Response(JSON.stringify({ok:true,found:true,evidence_id:evidence?.id,claim_ids:claimIds,event_ids:eventIds,data:{denom,status,regDate,cancelDate,category}}),{headers:H});
 });
-
 

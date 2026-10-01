@@ -19,8 +19,9 @@ Deno.serve(async(req:Request)=>{
   const {data:profile}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).maybeSingle();
   const orgId=profile?.active_organization_id;
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
-  const {data:member}=await admin.from("organization_members").select("status").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
+  const {data:member}=await admin.from("organization_members").select("status,role").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
   if(member?.status!=="ACTIVE") return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
+  if(member.role==='VIEWER')return new Response(JSON.stringify({error:'Viewer is read-only'}),{status:403,headers:H});
 
   const now=new Date().toISOString();
   const {data:item,error:pickErr}=await admin.from("research_job_queue").select("*")
@@ -66,6 +67,9 @@ Deno.serve(async(req:Request)=>{
   const finished=new Date().toISOString();
   let finalStatus="COMPLETED";
   if(resp?.ok&&data?.research_run_id){
+    if(!data.history_capture?.ok){
+      try{const history=await fetch(url+'/functions/v1/capture-intelligence',{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({lead_id:claimed.lead_id,research_run_id:data.research_run_id}),signal:AbortSignal.timeout(25000)});data.history_capture=await history.json();}catch{data.history_capture={ok:false,error:'History capture pending; retry from dossier'};}
+    }
     await admin.from("research_job_queue").update({
       status:"COMPLETED",finished_at:finished,updated_at:finished,
       progress:{stage:"COMPLETED",message:claimed.job_type==="COMPANY_RESEARCH"?"Pesquisa profunda da empresa concluída.":"Investigação concluída.",research_run_id:data.research_run_id,research_status:data.status||null,company_id:claimed.company_id||null},
@@ -96,5 +100,3 @@ Deno.serve(async(req:Request)=>{
 
   return new Response(JSON.stringify({ok:finalStatus==="COMPLETED",status:finalStatus,job_id:claimed.id,research_run_id:data?.research_run_id||null,remaining_ready:remaining||0}),{status:finalStatus==="FAILED"?502:200,headers:H});
 });
-
-

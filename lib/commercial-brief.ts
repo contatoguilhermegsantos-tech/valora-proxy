@@ -4,9 +4,10 @@ export function buildCommercialBrief(d:Row) {
  const evidence:Row[]=d.evidence||[];
  const usable=new Set(evidence.filter(e=>e.verification_status==='VERIFIED').map(e=>e.id));
  const refs=(row:Row,key:string):string[]=>[...new Set<string>((row[key]||[]).filter((x:Row)=>!x.support_type||x.support_type==='SUPPORTS').map((x:Row)=>x.evidence_id).filter((id:string)=>usable.has(id)))];
- const facts:Row[]=(d.claims||[]).filter((c:Row)=>c.status==='VERIFIED'&&c.classification==='FACT'&&refs(c,'claim_evidence').length);
- const events:Row[]=(d.events||[]).filter((e:Row)=>e.status==='VERIFIED'&&refs(e,'event_evidence').length);
- const rels:Row[]=(d.relationships||[]).filter((r:Row)=>r.status==='VERIFIED'&&refs(r,'relationship_evidence').length);
+ const contradicted=(row:Row,key:string)=>(row[key]||[]).some((x:Row)=>x.support_type==='CONTRADICTS'&&usable.has(x.evidence_id));
+ const facts:Row[]=(d.claims||[]).filter((c:Row)=>c.status==='VERIFIED'&&c.classification==='FACT'&&refs(c,'claim_evidence').length&&!contradicted(c,'claim_evidence'));
+ const events:Row[]=(d.events||[]).filter((e:Row)=>e.status==='VERIFIED'&&e.classification==='FACT'&&refs(e,'event_evidence').length&&!contradicted(e,'event_evidence'));
+ const rels:Row[]=(d.relationships||[]).filter((r:Row)=>r.status==='VERIFIED'&&r.classification==='FACT'&&refs(r,'relationship_evidence').length&&!contradicted(r,'relationship_evidence'));
  const linked:Row[]=(d.companies||[]).filter((c:Row)=>c.link_status!=='REJECTED');
  const rejected=new Set((d.companies||[]).filter((c:Row)=>c.link_status==='REJECTED').map((c:Row)=>c.id));
  const companies=[...new Map<string,Row>([...(d.extra_companies||[]).filter((c:Row)=>!rejected.has(c.id)),...linked].map((c:Row)=>[c.id,c] as [string,Row])).values()];
