@@ -181,7 +181,7 @@ Deno.serve(async(req:Request)=>{
     await setStep("cnpj_qsa","BLOCKED","A evidência cadastral foi revisada e não está verificada. Nenhum fato ou vínculo foi restaurado automaticamente.",undefined,{evidence_id:data.evidence_id});
    }else if(resp.ok&&data?.company_id){
     companyId=data.company_id;
-    await setStep("cnpj_qsa","COMPLETED","Cadastro consultado. "+(data.relationship_ids?.length||0)+" relação(ões) de QSA persistida(s) com evidência.",undefined,{company_id:companyId,evidence_id:data.evidence_id});
+    await setStep("cnpj_qsa","COMPLETED","Cadastro consultado via "+(data.provider==='base_empresarial_rfb'?'Base Empresarial (fallback)':'BrasilAPI')+". "+(data.relationship_ids?.length||0)+" relação(ões) de QSA persistida(s) com evidência.",undefined,{company_id:companyId,evidence_id:data.evidence_id,provider:data.provider||'brasilapi_cnpj'});
     if(lead.kind==="COMPANY"){
       await admin.from("leads").update({identity_status:"SUPPORTED",updated_at:new Date().toISOString()}).eq("id",leadId).eq("organization_id",orgId).neq("identity_status","VERIFIED");
       identityStatus="SUPPORTED";

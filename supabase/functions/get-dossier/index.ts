@@ -76,7 +76,7 @@ Deno.serve(async(req:Request)=>{
   if(history.error||reviewLog.error||candidateReviewLog.error)return new Response(JSON.stringify({error:'Could not load intelligence history'}),{status:500,headers:H});
   const latestSourceSteps=(latestRun?.research_steps||[]).filter((s:any)=>s.source_key);
   const relevantSources=[...new Set(latestSourceSteps.map((s:any)=>s.source_key))];
-  const successfulSources=[...new Set(latestSourceSteps.filter((s:any)=>["COMPLETED","PARTIAL"].includes(s.status)).map((s:any)=>s.source_key))];
+  const successfulSources=[...new Set(latestSourceSteps.filter((s:any)=>["COMPLETED","PARTIAL"].includes(s.status)).map((s:any)=>s.metadata?.provider||s.source_key))];
   const attemptedSources=[...new Set(latestSourceSteps.filter((s:any)=>["COMPLETED","PARTIAL","FAILED"].includes(s.status)).map((s:any)=>s.source_key))];
   const blockedSources=[...new Set(latestSourceSteps.filter((s:any)=>s.status==="BLOCKED").map((s:any)=>s.source_key))];
   const sourceCoverage={

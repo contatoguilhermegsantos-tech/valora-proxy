@@ -4,7 +4,7 @@ Escopo: somente max-v1 e Supabase de teste. Main e produção preservadas.
 
 ## Entrega
 - Fallback cadastral BrasilAPI → Base Empresarial, com estabelecimento exato, atribuição do provedor, documento imutável e preservação de revisão. Não utiliza CNPJ.ws, Brave ou Portal.
-- Comparação de claims ignora diferenças de apresentação e respeita a empresa. Mudanças substantivas continuam gerando divergências. Caso real de QA restaurado com auditoria após detectar ATIVA/Ativa, MATRIZ/Matriz, DEM AIS/Demais e Barretos/BARRETOS.
+- Comparação de claims ignora diferenças de apresentação e respeita a empresa. Mudanças substantivas continuam gerando divergências. Código e descrição CNAE usam predicados distintos; descrição indisponível não é substituída pelo código. Caso real de QA restaurado com auditoria após detectar ATIVA/Ativa, MATRIZ/Matriz, DEMAIS/Demais e Barretos/BARRETOS.
 - Fontes PNCP, CVM e BNDES preservam documentos e registros rejeitados, exigem vínculo da empresa no lead e bloqueiam VIEWER. BNDES e IPE falhados não representam ausência de registros. Central de Balanços grava em lotes menores.
 - Revisão de relações com razão e auditoria transacional. Confirmação exige documento verificado, ausência de contradição e entidades resolvidas; atribuição ao lead e parentesco continuam exigindo seus próprios fluxos.
 - Candidatos QSA pessoa jurídica aceitam CNPJ completo para validar nome, raiz, estabelecimento e QSA atual em dois cadastros. Fonte indisponível, candidato rejeitado ou QSA sem correspondência bloqueiam confirmação. Não se atribui o CNPJ ao lead original.
@@ -12,11 +12,13 @@ Escopo: somente max-v1 e Supabase de teste. Main e produção preservadas.
 - Oportunidades de crédito/ciclo de caixa, investimento, governança/decisão, continuidade e execução de contratos usam somente fatos com apoio verificado e sem contradição. Cada hipótese inclui pergunta, próxima validação, documentos e limites. Capital social não determina liquidez ou patrimônio.
 
 ## Validação
-- Build local Next.js aprovado; testes automatizados de identidade, expansão, passaporte, fontes, oportunidades, histórico e permissões.
+- Build local Next.js aprovado; 57 testes automatizados de identidade, expansão, passaporte, fontes, oportunidades, histórico e permissões.
 - API real: autenticação 401, recurso de outra organização 404, VIEWER 403 em oito funções; OWNER de QA restaurado.
+- Autoauditoria de invariantes ao final: 0 violações críticas e 0 alertas.
 - Banco real: leitura RLS por organização, escrita de snapshots pelo cliente bloqueada, RPC de revisão indisponível ao cliente; revisão de relação e auditoria confirmadas em transação revertida.
+- API real de rejeição: vínculo rejeitado permaneceu assim após reconsulta cadastral; tentativa de reativação automática recusada com 409. Capturas preservaram a perda de suporte e a restauração explícita do fixture de QA.
 - Corpus real no workspace de QA: Hospital Village (saúde), WEG SA (indústria/holding) e SLC Agrícola (agro). Cadastros obtidos pelo fallback; sem dados financeiros inferidos ou contatos fabricados.
-- Validação final do preview e do fluxo de captura está registrada no relatório local ao encerrar o bloco.
+- Preview 4ee997f READY: oportunidades, histórico e validação visíveis. Captura pelo navegador gravou 18 itens; repetição retornou estado inalterado sem duplicar. API de pesquisa completa gerou execução PARTIAL (falha real do Querido Diário) e snapshot automático vinculado à execução. Revisão final da apresentação removeu temas duplicados.
 
 ## Limites observados
 - BrasilAPI: timeout a partir do Supabase e 403 em consulta direta; Base Empresarial respondeu às três consultas de QA. Disponibilidade externa continua sujeita a mudança.

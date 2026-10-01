@@ -95,7 +95,7 @@ Deno.serve(async (req: Request) => {
     city: canonicalRegistryText(raw.municipio),
     state: canonicalRegistryText(raw.uf),
     cnae_code: raw.cnae_fiscal ? String(raw.cnae_fiscal) : null,
-    cnae_description: raw.cnae_fiscal_descricao || (raw.cnae_fiscal ? `CNAE ${raw.cnae_fiscal} (descrição indisponível na fonte)` : null),
+    cnae_description: raw.cnae_fiscal_descricao ?? null,
     size: canonicalRegistryText(raw.porte ?? raw.descricao_porte),
     capital_social: raw.capital_social == null ? null : Number(raw.capital_social),
     qsa
@@ -131,7 +131,7 @@ Deno.serve(async (req: Request) => {
   const {data:legacyReview,error:legacyError}=await admin.from("evidence").select("id,verification_status").eq("organization_id",orgId).eq("lead_id",leadId).eq("dedupe_key",baseEvidenceKey).maybeSingle();
   if(legacyError)return new Response(JSON.stringify({error:"Could not load previous evidence review"}),{status:500,headers:JSON_HEADERS});
   if(legacyReview&&legacyReview.verification_status!=="VERIFIED")return new Response(JSON.stringify({ok:true,status:"REVIEW_REQUIRED",company_id:company.id,evidence_id:legacyReview.id,claim_ids:[],relationship_ids:[],data:{cnpj}}),{headers:JSON_HEADERS});
-  const snapshot=JSON.stringify({document_schema_version:2,provider,...normalized,qsa:qsa.map((p:any)=>({name:p.name,role:p.role,identifier:p.identifier,partnership_start_date:p.partnership_start_date})),opening_date:raw.data_inicio_atividade,legal_nature:raw.natureza_juridica,secondary_activities:raw.cnaes_secundarios});
+  const snapshot=JSON.stringify({document_schema_version:3,provider,...normalized,qsa:qsa.map((p:any)=>({name:p.name,role:p.role,identifier:p.identifier,partnership_start_date:p.partnership_start_date})),opening_date:raw.data_inicio_atividade,legal_nature:raw.natureza_juridica,secondary_activities:raw.cnaes_secundarios});
   const fingerprint=[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(snapshot)))].map(n=>n.toString(16).padStart(2,"0")).join("");
   const evidencePayload = {
     organization_id: orgId, lead_id: leadId, company_id: company.id, source_registry_id: source?.id,
@@ -142,7 +142,7 @@ Deno.serve(async (req: Request) => {
     publisher, retrieved_at: new Date().toISOString(),
     dedupe_key: baseEvidenceKey+":"+fingerprint,evidence_hash:fingerprint,
     reliability_weight: 0.75, raw_reference: cnpj,
-    excerpt: `Razão social: ${normalized.legal_name ?? "não informada"}; situação: ${normalized.registration_status ?? "não informada"}; município/UF: ${normalized.city ?? "?"}/${normalized.state ?? "?"}; CNAE: ${normalized.cnae_description ?? "não informado"}; capital social declarado: ${normalized.capital_social ?? "não informado"}; porte: ${normalized.size ?? "não informado"}; início das atividades: ${raw.data_inicio_atividade ?? "não informado"}; natureza jurídica: ${raw.natureza_juridica ?? "não informada"}; atividades secundárias: ${(raw.cnaes_secundarios||[]).map(a=>a.descricao).filter(Boolean).join("; ")||"não informadas"}; QSA: ${qsa.map((x:any)=>x.name + (x.role ? " ("+x.role+")" : "")).join("; ") || "não informado"}.`,
+    excerpt: `Razão social: ${normalized.legal_name ?? "não informada"}; situação: ${normalized.registration_status ?? "não informada"}; município/UF: ${normalized.city ?? "?"}/${normalized.state ?? "?"}; CNAE principal (código): ${normalized.cnae_code ?? "não informado"}; descrição: ${normalized.cnae_description ?? "não informado"}; capital social declarado: ${normalized.capital_social ?? "não informado"}; porte: ${normalized.size ?? "não informado"}; início das atividades: ${raw.data_inicio_atividade ?? "não informado"}; natureza jurídica: ${raw.natureza_juridica ?? "não informada"}; atividades secundárias: ${(raw.cnaes_secundarios||[]).map(a=>a.descricao).filter(Boolean).join("; ")||"não informadas"}; QSA: ${qsa.map((x:any)=>x.name + (x.role ? " ("+x.role+")" : "")).join("; ") || "não informado"}.`,
     verification_status: "VERIFIED", last_verified_at: new Date().toISOString(),
     usage_scope: "INTERNAL", created_by: user.id
   };
@@ -161,6 +161,7 @@ Deno.serve(async (req: Request) => {
     ["CNPJ_STATUS", normalized.legal_name || cnpj, "registration_status", normalized.registration_status, normalized.status_date],
     ["CNPJ_NAME", normalized.legal_name || cnpj, "legal_name", normalized.legal_name, null],
     ["CNPJ_LOCATION", normalized.legal_name || cnpj, "location", [normalized.city, normalized.state].filter(Boolean).join("/") || null, null],
+    ["CNPJ_CNAE_CODE", normalized.legal_name || cnpj, "cnae_code", normalized.cnae_code, null],
     ["CNPJ_CNAE", normalized.legal_name || cnpj, "cnae", normalized.cnae_description, null]
   ].filter((x: any[]) => x[3]);
 
