@@ -1,5 +1,9 @@
 type Source = {key:string;name?:string;connection_status?:string;action_url?:string;limitations?:string};
 type Route = {key:string;question:string;steps:string[];providers:{key:string;fn?:string;credential?:string}[];requiresCompany:boolean;limit:string;next:string};
+export function normalizeResearchStep<T extends {source_key?:string;result_summary?:string;action_url?:string}>(step:T) {
+ if(step.source_key!=='querido_diario')return step;
+ return {...step,action_url:'https://api.queridodiario.org.br/docs',result_summary:String(step.result_summary||'').includes('Município não está coberto/localizado')?'Resultado legado inconclusivo. Reexecute a investigação para confirmar a cobertura municipal.':step.result_summary};
+}
 export const SOURCE_ROUTES:Route[] = [
  {key:'company_discovery',question:'Quais empresas podem corresponder a esta pessoa?',steps:['name_discovery'],providers:[{key:'base_empresarial_rfb',fn:'name-company-discovery'}],requiresCompany:false,limit:'Nome e localidade produzem candidatos; homônimos precisam de validação.',next:'Revisar candidatos e investigar cada empresa em seu próprio núcleo.'},
  {key:'company_registry',question:'Qual é o cadastro e o quadro societário deste CNPJ?',steps:['cnpj_qsa'],providers:[{key:'brasilapi_cnpj',fn:'cnpj-enrich'},{key:'base_empresarial_rfb',fn:'cnpj-enrich'}],requiresCompany:true,limit:'O conector tenta BrasilAPI e utiliza Base Empresarial como alternativa. QSA não comprova controle final, parentesco ou poderes financeiros.',next:'Consultar cadastro e revisar vínculos documentados; validar controle e poderes por atos societários.'},

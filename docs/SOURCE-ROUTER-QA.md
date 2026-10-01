@@ -10,6 +10,10 @@ Escopo: max-v1 e backend de teste. Main e produção preservadas. Próxima etapa
 - Empresa rejeitada, candidato não resolvido, evidência rejeitada e apoio contraditório não preenchem as respostas. Empresas são identificadas nominalmente, preservando o núcleo de origem.
 - Navegação do dossiê quebra em linhas para manter Validação e Histórico acessíveis.
 
-Validação automatizada: 66 testes aprovados, incluindo execução do handler real de orquestração com transporte/banco controlados, limite de concorrência, espera pelo lote, permissões, rotas sem credenciais, elegibilidade CVM e isolamento de evidências. Build Next.js e tipos aprovados.
+Validação automatizada: 67 testes aprovados, incluindo execução do handler real de orquestração com transporte/banco controlados, limite de concorrência, espera pelo lote, permissões, rotas sem credenciais, elegibilidade CVM e isolamento de evidências. Build Next.js e tipos aprovados.
+
+API real em teste: 401 sem sessão, 404 entre organizações, 11 rotas para núcleo empresarial. Pesquisa concluída em 18 segundos neste caso, status PARTIAL, quatro etapas concluídas, quatro parciais, quatro bloqueadas e uma falha externa. Consultas independentes apresentaram sobreposição de execução; todas as etapas chegaram a um estado final e o histórico foi capturado automaticamente. Não é uma garantia de tempo para outras empresas. Perguntas financeiras e eventos sem documentos permaneceram desconhecidas.
+
+QA visual da prévia: perguntas, evidências e rotas acessíveis pela aba Investigação; navegação do dossiê quebra em linhas. A leitura normaliza registros municipais legados para inconclusivos e corrige o endereço documental do Querido Diário em todas as apresentações, preservando o registro original no banco.
 
 Limites: seleção por qualidade/custo histórico e roteamento adaptativo ainda não implementados. Nenhum novo fornecedor contratado. CADE/Juntas/DOU e indexação própria continuam pendentes. Validação ampliada de 30 empresas e seus sócios continua pendente. Não há promessa de redução percentual de tempo; depende das fontes externas.

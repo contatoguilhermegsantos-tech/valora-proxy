@@ -1,5 +1,5 @@
 
-import {buildSourceRoutes} from '../_shared/source-router.ts';
+import {buildSourceRoutes,normalizeResearchStep} from '../_shared/source-router.ts';
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, GET, OPTIONS"};
@@ -100,7 +100,7 @@ Deno.serve(async(req:Request)=>{
     companies:(links.data||[]).map((l:any)=>({...l.companies,link_id:l.id,link_status:l.status,link_role:l.role_label})),
     people:people.data||[],extra_companies:extraCompanies.data||[],
     relationships:relationships.data||[],events:events.data||[],evidence:evidence.data||[],claims:claims.data||[],
-    signals:signals.data||[],research_runs:runs.data||[],candidates:candidates.data||[],questions:questions.data||[],
+    signals:signals.data||[],research_runs:(runs.data||[]).map((r:any)=>({...r,research_steps:(r.research_steps||[]).map(normalizeResearchStep)})),candidates:candidates.data||[],questions:questions.data||[],
     divergences:divergences.data||[],identity_assessments:identityAssessments.data||[],identity_audit:identityAudit.data||[],identity_source_attempts:identitySourceAttempts.data||[],coverage:coverage.data||null,source_coverage:sourceCoverage
   }),{headers:H});
 });
