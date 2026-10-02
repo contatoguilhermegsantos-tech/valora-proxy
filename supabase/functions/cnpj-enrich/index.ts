@@ -5,6 +5,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { insertEvidenceOnce } from '../_shared/connector-policy.ts';
 import { fetchSourceJson } from '../_shared/source-operations.ts';
 import {normalizeBaseCompany,canonicalRegistryText} from '../_shared/cnpj-fallback.ts';
+import {qsaRelationshipType} from '../_shared/qsa-role.ts';
 
 const JSON_HEADERS = {"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, GET, OPTIONS"};
 const cnpjNorm = (v: unknown) => String(v ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -244,7 +245,7 @@ Deno.serve(async (req: Request) => {
     }
     if (!person?.id) continue;
 
-    const relType = /administrador|diretor|presidente/i.test(partner.role || "") ? "ADMINISTRADOR" : "SOCIO";
+    const relType = qsaRelationshipType(partner.role);
     const { data: existingRel } = await admin.from("relationships").select("id,status")
       .eq("organization_id",orgId).eq("lead_id",leadId).eq("from_entity_type","COMPANY").eq("from_entity_id",company.id)
       .eq("to_entity_type","PERSON").eq("to_entity_id",person.id).eq("relationship_type",relType).maybeSingle();

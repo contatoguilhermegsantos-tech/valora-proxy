@@ -35,7 +35,7 @@ export function RelationshipGraph({leadId,leadName,relationships,onPromoted,read
       const a=r.from_entity_type==='LEAD'?nodes[0]:nodeMap.get(`${r.from_entity_type}:${r.from_entity_id||r.from_label}`)
       const b=r.to_entity_type==='LEAD'?nodes[0]:nodeMap.get(`${r.to_entity_type}:${r.to_entity_id||r.to_label}`)
       if(!a||!b)return null
-      return <g key={r.id}><line x1={a.x+180} y1={a.y+35} x2={b.x} y2={b.y+35}/><text x={(a.x+b.x+180)/2} y={(a.y+b.y+70)/2-6}>{r.relationship_type}</text></g>
+      return <g key={r.id}><line x1={a.x+180} y1={a.y+35} x2={b.x} y2={b.y+35}/><text x={(a.x+b.x+180)/2} y={(a.y+b.y+70)/2-6}>{r.relationship_type==='QSA_PARTICIPANT'?'Participante QSA':r.relationship_type}</text></g>
     })}</svg>
     {nodes.map(n=><div key={n.key} className={`graph-node graph-${n.type.toLowerCase()}`} style={{left:n.x,top:n.y}}>
       <div className="graph-type">{n.type}</div><strong>{n.label}</strong>
@@ -43,4 +43,3 @@ export function RelationshipGraph({leadId,leadName,relationships,onPromoted,read
     </div>)}
   </div></>
 }
-

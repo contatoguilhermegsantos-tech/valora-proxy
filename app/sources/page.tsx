@@ -8,6 +8,7 @@ import { supabaseBrowser } from '@/lib/supabase'
 const healthLabels:Record<string,string>={RESPONDING:'Última consulta respondeu',FAILURE:'Falha na última consulta',CONTEXT_REQUIRED:'Limitação de cobertura ou contexto',INCONCLUSIVE:'Registro antigo inconclusivo'}
 const resultLabels:Record<string,string>={TIMEOUT:'Fonte não respondeu dentro do prazo',NETWORK_ERROR:'Falha de conexão com a fonte',INVALID_RESPONSE:'Resposta da fonte não pôde ser validada',HTTP_403:'Fonte recusou a consulta',HTTP_503:'Fonte temporariamente indisponível',CITY_LOOKUP_FAILED:'Falha ao consultar municípios',CITY_NOT_COVERED:'Cobertura não confirmada pelo conector antigo',CITY_NOT_COVERED_CONFIRMED:'Município fora da cobertura consultada',CITY_REQUIRED:'Informe o município',CITY_AMBIGUOUS:'Informe a UF',NO_SEARCH_TERMS:'Termos insuficientes',QUERY_FAILED:'Pesquisa não concluída',PARTIAL:'Consulta parcial',MENTIONS_FOUND:'Menções encontradas',NO_MENTIONS:'Consulta concluída sem menções'}
 const dateTime=(v:string)=>v?new Date(v).toLocaleString('pt-BR'):'—'
+Object.assign(resultLabels,{FINANCIAL_FACTS_FOUND:'Valores financeiros documentados',NO_SELECTED_FINANCIAL_FACTS:'Contas selecionadas não localizadas; sem conclusão sobre finanças',REVIEW_REQUIRED:'Documento aguarda revisão'})
 export default function Sources(){return <AuthGate><SourcesContent/></AuthGate>}
 function SourcesContent(){
  const [data,setData]=useState<any>(null)

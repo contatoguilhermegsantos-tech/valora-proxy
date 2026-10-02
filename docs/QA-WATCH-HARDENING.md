@@ -1,0 +1,35 @@
+# Revisão dos alertas do MAX QA Watch
+
+Escopo: projeto Supabase de teste do MAX e branch `max-v1`. Inspeção por catálogos, advisor e código; nenhuma configuração de Auth, RLS, gateway JWT, extensão ou ambiente de produção foi alterada nesta revisão. Migração `20261002013420_qa_watch_function_hardening_fk_indexes` aplicada e verificada no projeto de teste.
+
+## Correções confirmadas e propostas
+
+`public.normalize_cnpj_columns()` é `SECURITY DEFINER`, retorna `trigger` e tem `EXECUTE` concedido a `PUBLIC`, `anon`, `authenticated` e `service_role`. Seus três usos são os triggers de normalização em `leads`, `companies` e `public_contract_index`. Revogar `EXECUTE` dos três primeiros reduz a superfície exposta e preserva o uso interno. O alerta de RPC do advisor não comprova exploração: uma função que retorna `trigger` depende de contexto de trigger. A normalização deve ser verificada por uma escrita de fixture controlada após a migração. [Permissões de funções](https://supabase.com/docs/guides/database/functions#function-privileges), [triggers PostgreSQL](https://www.postgresql.org/docs/current/sql-createtrigger.html).
+
+`private.normalize_cnpj(text)` e `private.is_valid_cnpj(text)` não têm `search_path` fixo. A primeira usa apenas funções nativas; a segunda chama `private.normalize_cnpj` com schema explícito e funções nativas. O corpo do trigger também usa o helper com schema explícito. Fixar `search_path = ''` nas três funções preserva suas dependências e evita resolução de nomes controlada pelo chamador. Não é necessário reescrever seus corpos. [Busca de nomes em funções](https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker), [advisor](https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable).
+
+O advisor de desempenho confirmou 23 FKs sem índice com a coluna da FK no início. As sete consultas de histórico/identidade/contexto do dossiê **já têm** índices `(organization_id, lead_id, timestamp DESC)`. Um `EXPLAIN` da leitura de snapshots confirmou uso de `intelligence_snapshot_lead`; não existe evidência de que esses avisos expliquem os timeouts de cron. A proposta acrescenta 13 índices simples para verificar referências de lead, execução de pesquisa, candidato e relacionamento sem um filtro de organização, preservando os índices de leitura existentes. Não há duplicata de definição nem índice prévio com essas colunas como prefixo. Não foi medido ganho de tempo, e o volume de teste é pequeno. [FKs e índices](https://supabase.com/docs/guides/database/database-linter?lint=0001_unindexed_foreign_keys).
+
+Os dez avisos restantes de FK são referências a usuários/autores (sete) e releases nos três índices RFB ainda vazios. Não são a consulta corrente do dossiê; podem ser tratados quando houver fluxo de gestão de usuários/releases ou carga RFB, sem abrir permissões dessas tabelas.
+
+## Alertas que exigem interpretação
+
+As dez tabelas com RLS e sem políticas são internas: índices/jobs/releases/arquivos RFB, Source Candidate Backlog, execução/linhas de stress test e `system_quality_runs`. A consulta de privilégios confirmou `anon SELECT = false`, `authenticated SELECT = false` e `service_role SELECT = true` em todas. Criar políticas de leitura pública para eliminar o aviso mudaria o acesso do produto. [RLS sem políticas](https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy).
+
+As políticas de `leads`, `companies`, `claims`, snapshots e logs de revisão usam `TO authenticated` **e** `private.is_org_member(organization_id)`; escrita de leads exige `private.is_org_operator`. Os helpers conferem `auth.uid()` contra associação `ACTIVE` na organização e, para escrita/administração, o papel permitido. Portanto, o aviso sobre sign-in anônimo não equivale a acesso do papel `anon` nem a acesso irrestrito às organizações. Usuários criados por `signInAnonymously()` recebem papel `authenticated`; uma decisão futura de proibir esse tipo de conta deve considerar o claim `is_anonymous` e os fluxos de provisionamento, sem substituir a autorização por organização. Não foi feito teste de criação de conta anônima nesta revisão. [Sign-in anônimo](https://supabase.com/docs/guides/auth/auth-anonymous#anonymous-user-vs-the-anon-key).
+
+`capture-intelligence`, `review-relationship` e `review-graph-candidate` usam `verify_jwt = false` no gateway, mas seu código exige `Authorization`, valida a sessão com `auth.getUser()`, exige associação ativa à organização, bloqueia `VIEWER` e consulta o lead/relacionamento/candidato dentro da organização antes de escrever com o cliente administrativo. As RPCs de revisão são restritas ao serviço. Esse desenho requer manter a validação no handler; o valor do gateway isoladamente não demonstra endpoint público sem autenticação. Esta revisão conferiu o código; os testes HTTP 401/403/404 pertencem ao QA funcional correspondente. [Autenticação de Edge Functions](https://supabase.com/docs/guides/functions/auth).
+
+`PARTIAL` nas execuções indica cobertura incompleta e fontes bloqueadas/falhas; não deve ser interpretado automaticamente como regressão. A avaliação precisa considerar as etapas e sua cobertura documental. Nenhum status de execução foi reclassificado nesta revisão.
+
+`pg_net` no schema `public`, proteção contra senhas vazadas desativada e índices ainda não usados permanecem como alertas separados. Esta proposta não move extensões, modifica Auth ou remove índices a partir de estatísticas de um ambiente pequeno. [Extensão](https://supabase.com/docs/guides/database/database-linter?lint=0014_extension_in_public), [senhas](https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection), [índices não usados](https://supabase.com/docs/guides/database/database-linter?lint=0005_unused_index).
+
+## Verificação após aplicação
+
+- Confirmar `EXECUTE = false` para `anon`/`authenticated`, e `true` para `service_role`, na função de trigger; confirmar `search_path` vazio nas três funções.
+- Repetir casos de CNPJ: formatado/canônico válidos, dígito verificador inválido, texto alfanumérico incompleto e nulo; resultados devem permanecer idênticos.
+- Executar uma atualização de CNPJ formatado em fixture QA com rollback para conferir o trigger, sem alterar dados de trabalho.
+- Repetir advisors; os dois avisos de `search_path` e os dois de `SECURITY DEFINER` público devem desaparecer. A previsão de FKs é 23 → 10; documentar a contagem observada.
+- Confirmar os 13 índices válidos e preservar leitura de histórico pelo índice existente. Os demais avisos têm a classificação acima e não são encerrados por esta migração.
+
+Resultado real: trigger sem EXECUTE para anon/authenticated, serviço preservado; três funções com search_path vazio; matriz de normalização idêntica; atualização de CNPJ formatado em fixture QA normalizada corretamente e revertida por rollback. Os 13 índices são válidos. Advisor não apresenta mais os alertas de search_path ou EXECUTE público; FKs sem índice passaram de 23 para 10. Demais avisos permanecem classificados acima, sem alegar que todos foram eliminados.

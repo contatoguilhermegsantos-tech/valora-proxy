@@ -1,4 +1,5 @@
-
+import {persistSourceEvidence} from '../_shared/source-evidence.ts';
+import {fetchSourceJson} from '../_shared/source-operations.ts';
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -6,18 +7,9 @@ const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Ac
 const norm=(v:string)=>(v||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase().replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
 const cnpjNorm=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
 const cnpjShape=(v:unknown)=>/^[A-Z0-9]{12}[0-9]{2}$/.test(cnpjNorm(v));
-const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
-async function fetchJsonRetry(url:string,attempts=4){
-  let lastStatus=0;
-  for(let i=0;i<attempts;i++){
-    const r=await fetch(url,{signal:AbortSignal.timeout(12000),headers:{Accept:"application/json","User-Agent":"MAX-Intelligence/1.0"}});
-    lastStatus=r.status;
-    if(r.ok)return {ok:true,status:r.status,json:await r.json()};
-    if(r.status!==429)return {ok:false,status:r.status,json:null};
-    const retryAfter=Number(r.headers.get("retry-after")||0);
-    await sleep(retryAfter>0?retryAfter*1000:[350,800,1600,2600][i]||3000);
-  }
-  return {ok:false,status:lastStatus,json:null};
+async function fetchJsonRetry(url:string){
+  const r=await fetchSourceJson(url,v=>v&&typeof v==='object'&&'data' in v,{headers:{'User-Agent':'MAX-Intelligence/1.0'}});
+  return {...r,json:r.data};
 }
 
 Deno.serve(async(req:Request)=>{
@@ -67,16 +59,20 @@ Deno.serve(async(req:Request)=>{
     return new Response(JSON.stringify({error:"Name discovery network error",detail:String(e)}),{status:502,headers:H});
   }
 
-  const partners=(Array.isArray(partnerJson?.data)?partnerJson.data:[])
-    .filter((x:any)=>norm(String(x.partner_name||""))===name)
-    .slice(0,15);
+  const exactPartners=(Array.isArray(partnerJson?.data)?partnerJson.data:[])
+    .filter((x:any)=>norm(String(x.partner_name||""))===name);
+  const partners=exactPartners.slice(0,15);
+  let incomplete=exactPartners.length>partners.length||Boolean(partnerJson?.links?.next)||Number(partnerJson?.meta?.total||0)>Number(partnerJson?.data?.length||0);
+  const searchLineage={original:{name:String(b.name||lead.name||''),city:lead.city||null,state:lead.state||null},query_name:name,transformations:['NAME_NORMALIZATION'],geographic_filter_applied:false,coverage:'Resposta nominal do provedor, limitada a 15 registros; sem pesquisa por sobrenome ou identidade pessoal confirmada.'};
 
   const existingQ=await admin.from("candidate_entities").select("id,metadata,validation_status")
     .eq("organization_id",orgId).eq("lead_id",leadId).eq("candidate_type","RFB_QSA_NAME_MATCH");
+  if(existingQ.error)return new Response(JSON.stringify({error:'Could not load candidate reviews'}),{status:500,headers:H});
   const existing=new Map((existingQ.data||[]).map((x:any)=>[String(x.metadata?.basic_cnpj||""),x]));
 
   const candidates:any[]=[];
   for(const partner of partners){
+    if(Date.now()-started>45000){incomplete=true;break;}
     const basic=cnpjNorm(partner.basic_cnpj).slice(0,8);
     if(basic.length!==8)continue;
     let company:any=null;
@@ -84,7 +80,7 @@ Deno.serve(async(req:Request)=>{
       const cr=await fetchJsonRetry(`https://app.baseempresarial.com.br/api/v1/companies/${basic}`);
       if(cr.ok) company=cr.json?.data||null;
     }catch{}
-    if(!company)continue;
+    if(!company){incomplete=true;continue;}
 
     const est=(Array.isArray(company.establishments)?company.establishments:[]);
     const hq=est.find((e:any)=>String(e.main_branch_office?.code||"")==="1")||est[0]||{};
@@ -109,17 +105,19 @@ Deno.serve(async(req:Request)=>{
       partnership_start_date:partner.partnership_start_date||null,
       age_group:partner.age_group?.name||null,
       exact_name_match:exactName,locality_match:localityMatch,city_match:cityMatch,state_match:stateMatch,
-      source_url:`https://baseempresarial.com.br/empresa/${fullCnpj||basic}`
+      source_url:`https://baseempresarial.com.br/empresa/${fullCnpj||basic}`,
+      search_lineage:{...searchLineage,match_scope:cityMatch?'CITY':stateMatch?'STATE':'NATIONAL',city_constraint_matched:cityMatch,state_constraint_matched:stateMatch}
     };
 
     let candidateId:string|null=null;
     const ex=existing.get(basic);
     if(ex){
       candidateId=ex.id;
-      await admin.from("candidate_entities").update({
+      const updated=await admin.from("candidate_entities").update({
         research_run_id:researchRunId||undefined,label:company.corporate_name||basic,
         candidate_reason:reason,confidence:ex.validation_status==="CONFIRMED"?"HIGH":confidence,metadata:{...(ex.metadata||{}),...metadata}
-      }).eq("id",ex.id);
+      }).eq("id",ex.id).eq('organization_id',orgId).eq('validation_status',ex.validation_status);
+      if(updated.error)return new Response(JSON.stringify({error:'Candidate persistence failed'}),{status:500,headers:H});
     }else{
       const ins=await admin.from("candidate_entities").insert({
         organization_id:orgId,lead_id:leadId,research_run_id:researchRunId,
@@ -127,6 +125,7 @@ Deno.serve(async(req:Request)=>{
         candidate_type:"RFB_QSA_NAME_MATCH",confidence,validation_status:"UNVALIDATED",
         metadata,created_by:user.id
       }).select("id").single();
+      if(ins.error)return new Response(JSON.stringify({error:'Candidate persistence failed'}),{status:500,headers:H});
       candidateId=ins.data?.id||null;
     }
 
@@ -146,24 +145,7 @@ Deno.serve(async(req:Request)=>{
     ].filter(Boolean).join("; ")+". A coincidência nominal é uma pista de identidade, não confirmação de que o registro pertence ao lead pesquisado.";
 
     const dedupeKey=`base_empresarial:name:${leadId}:${digest}`;
-    let evidenceId:string|null=null;
-    const existingEvidence=await admin.from("evidence").select("id")
-      .eq("organization_id",orgId).eq("dedupe_key",dedupeKey).maybeSingle();
-    if(existingEvidence.data?.id){
-      evidenceId=existingEvidence.data.id;
-      await admin.from("evidence").update({
-        lead_id:leadId,source_registry_id:sourceRow?.id,
-        title:`Candidato societário por nome — ${company.corporate_name}`,
-        source_label:"Base Empresarial — dados públicos do CNPJ/RFB",
-        source_url:metadata.source_url,source_kind:"AGGREGATOR",
-        document_type:"RFB_QSA_NAME_DISCOVERY",publisher:"Base Empresarial / dados públicos do CNPJ-RFB",
-        retrieved_at:new Date().toISOString(),evidence_hash:digest,reliability_weight:0.75,
-        raw_reference:`partner_name=${partner.partner_name}; basic_cnpj=${basic}`,
-        excerpt,verification_status:"VERIFIED",last_verified_at:new Date().toISOString(),
-        usage_scope:"INTERNAL"
-      }).eq("id",evidenceId);
-    }else{
-      const insertedEvidence=await admin.from("evidence").insert({
+    const persistedEvidence=await persistSourceEvidence(admin,{
         organization_id:orgId,lead_id:leadId,source_registry_id:sourceRow?.id,
         title:`Candidato societário por nome — ${company.corporate_name}`,
         source_label:"Base Empresarial — dados públicos do CNPJ/RFB",
@@ -174,22 +156,21 @@ Deno.serve(async(req:Request)=>{
         raw_reference:`partner_name=${partner.partner_name}; basic_cnpj=${basic}`,
         excerpt,verification_status:"VERIFIED",last_verified_at:new Date().toISOString(),
         usage_scope:"INTERNAL",created_by:user.id
-      }).select("id").single();
-      evidenceId=insertedEvidence.data?.id||null;
-    }
+      });
+    if(persistedEvidence.error||!persistedEvidence.data)return new Response(JSON.stringify({error:'Evidence persistence failed'}),{status:500,headers:H});
+    const evidenceId=persistedEvidence.data.id;
 
-    candidates.push({candidate_id:candidateId,evidence_id:evidenceId,...metadata,confidence,validation_status:ex?.validation_status||"UNVALIDATED"});
+    candidates.push({candidate_id:candidateId,evidence_id:evidenceId,evidence_status:persistedEvidence.data.verification_status,...metadata,confidence,validation_status:ex?.validation_status||"UNVALIDATED"});
   }
 
   await admin.from("source_fetch_logs").insert({
     organization_id:orgId,source_registry_id:sourceRow?.id,endpoint_reference:"app.baseempresarial.com.br/api/v1/partners?filter[partner_name]",
-    success:true,http_status:200,result_status:candidates.length?"CANDIDATES_FOUND":"NO_CANDIDATES",
+    success:!incomplete,http_status:200,result_status:incomplete?'PARTIAL':candidates.length?"CANDIDATES_FOUND":"NO_CANDIDATES",
     duration_ms:Date.now()-started,created_by:user.id
   });
 
   return new Response(JSON.stringify({
-    ok:true,query_name:name,candidates_found:candidates.length,candidates,
+    ok:true,status:incomplete?'PARTIAL':'COMPLETED',complete:!incomplete,query_name:name,candidates_found:candidates.length,candidates,search_lineage:searchLineage,
     caveat:"Resultado por nome é candidato de identidade. Não confirma que o sócio encontrado é a mesma pessoa do lead sem validação contextual."
   }),{headers:H});
 });
-

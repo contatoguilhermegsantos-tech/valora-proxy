@@ -21,6 +21,9 @@ export function buildCommercialOpportunities(d:Row):CommercialOpportunity[]{
    add('Investimento e expansão',`${activityBasis}: ${activity.value}.`,'Existe investimento aprovado em equipamentos, capacidade ou expansão? Qual prazo, orçamento e fonte de recursos?','Confirmar projeto, orçamento, cronograma, retorno esperado e capacidade de pagamento.','CNAE e porte não demonstram projeto em curso ou capacidade de investimento.',activity.evidenceIds)
   }
   const ownership=passport.sections.find(s=>s.key==='ownership')?.items||[]
+  const financial=passport.sections.find(s=>s.key==='financial')?.items||[]
+  const statementValues=financial.filter(i=>['Receita documentada','Resultado líquido documentado','Caixa documentado'].includes(i.label))
+  if(statementValues.length)add('Planejamento financeiro documentado',statementValues.map(i=>`${i.label}: ${i.value}`).join(' '),'Como os resultados do exercício documentado se comparam à posição atual, ao orçamento e aos investimentos previstos?','Confirmar demonstrações atuais e individuais, contas a receber, dívida detalhada e necessidades declaradas pela empresa.','Valores consolidados históricos incluem controladas; não comprovam caixa disponível hoje, distribuição aos sócios ou patrimônio pessoal.',statementValues.flatMap(i=>i.evidenceIds))
   const participants=new Set(ownership.map(i=>i.value.trim().toUpperCase()))
   if(participants.size>=2){const ids=ownership.flatMap(i=>i.evidenceIds)
    add('Governança e decisão',`${ownership.length} vínculos de sócios ou administradores documentados no quadro consultado.`,'Quem pode deliberar sobre caixa, endividamento, investimentos e distribuição de resultados?','Validar contrato social atual, poderes, quóruns e responsáveis financeiros.','Vínculo no QSA não comprova poder de decisão financeira, participação ou conflito.',ids)

@@ -7,7 +7,11 @@ export function buildIntelligenceSnapshot(d:Row):IntelligenceSnapshot {
  const valid=(r:Row,k:string)=>r.status==='VERIFIED'&&r.classification==='FACT'&&refs(r,k).length&&!(r[k]||[]).some((x:Row)=>x.support_type==='CONTRADICTS'&&verified.has(x.evidence_id));
  const rejected=new Set((d.companies||[]).filter((c:Row)=>c.link_status==='REJECTED').map((c:Row)=>c.id));
  const items:HistoryItem[]=[];
- for(const r of d.claims||[])if(valid(r,'claim_evidence')&&!rejected.has(r.company_id))items.push({key:JSON.stringify(['FACT',r.company_id||r.subject_entity_id||r.subject_label,r.predicate]),kind:'FACT',label:`${r.subject_label||'Empresa'} · ${r.predicate}`,value:String(r.value_text??JSON.stringify(r.value_json??null)),evidenceIds:refs(r,'claim_evidence')});
+ for(const r of d.claims||[])if(valid(r,'claim_evidence')&&!rejected.has(r.company_id)){
+  const financial=r.value_json?.financial_document;
+  const scope=financial?[financial.source_key,financial.period_start||null,financial.period_end,financial.scope,financial.unit]:[];
+  items.push({key:JSON.stringify(['FACT',r.company_id||r.subject_entity_id||r.subject_label,r.predicate,...scope]),kind:'FACT',label:`${r.subject_label||'Empresa'} · ${r.predicate}${financial?' · '+financial.period_end+' · consolidado':''}`,value:String(r.value_text??JSON.stringify(r.value_json??null)),evidenceIds:refs(r,'claim_evidence')});
+ }
  for(const r of d.relationships||[])if(valid(r,'relationship_evidence')&&!rejected.has(r.from_entity_id)&&!rejected.has(r.to_entity_id))items.push({key:JSON.stringify(['RELATIONSHIP',r.from_entity_type,r.from_entity_id||r.from_label,r.to_entity_type,r.to_entity_id||r.to_label,r.relationship_type]),kind:'RELATIONSHIP',label:`${r.from_label} → ${r.to_label}`,value:[r.relationship_type,r.valid_from||'',r.valid_to||''].join(' · '),evidenceIds:refs(r,'relationship_evidence')});
  for(const r of d.events||[])if(valid(r,'event_evidence')&&!rejected.has(r.company_id))items.push({key:JSON.stringify(['EVENT',r.company_id||r.lead_id,r.source_dedupe_key||r.id]),kind:'EVENT',label:String(r.title),value:[r.event_date||'Sem data',r.description||r.event_type].join(' · '),evidenceIds:refs(r,'event_evidence')});
  // Multivalued facts are grouped, so row order and duplicate source IDs never manufacture changes.

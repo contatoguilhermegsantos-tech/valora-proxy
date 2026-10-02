@@ -13,7 +13,7 @@ export function buildInvestigationReadiness(d:Row) {
  ];
  const companyIds=new Set(companies.map((c:Row)=>c.id));
  const conflictKeys=new Set((d.claims||[]).filter((c:Row)=>companyIds.has(c.company_id)&&c.status==='CONTRADICTED').map((c:Row)=>c.predicate));
- const predicates:Record<string,string[]>={identity:['legal_name','registration_status','opening_date','location','legal_nature'],operation:['cnae','cnae_code','secondary_activities','company_size'],ownership:[],decision:[],events:[],financial:['revenue','net_income','cash_balance','debt_balance']};
+ const predicates:Record<string,string[]>={identity:['legal_name','registration_status','opening_date','location','legal_nature'],operation:['cnae','cnae_code','secondary_activities','company_size'],ownership:[],decision:[],events:[],financial:['revenue','net_income','cash_balance','debt_balance','total_assets','current_assets','current_liabilities','equity']};
  const dimensions=fields.map(f=>{
   const items=passports.flatMap(p=>(p.sections.find(s=>s.key===f.key)?.items||[]).map(i=>({...i,companyName:p.company.legal_name||p.company.cnpj||'Empresa'})));
   const evidenceIds=[...new Set(items.flatMap(i=>i.evidenceIds))];

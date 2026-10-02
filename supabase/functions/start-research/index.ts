@@ -1,5 +1,6 @@
 import { resolveCompanyCnpj } from '../_shared/company-context.ts';
 import {buildSourceRoutes,runIndependent} from '../_shared/source-router.ts';
+import {ensureCompanyResearchLink,persistCompanyIdentitySupport} from '../_shared/company-research-link.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -23,7 +24,8 @@ const COMMON_COMPANY:StepDef[]=[
 const STRATEGIES:Record<Strategy,StepDef[]>={
  EMPRESARIO:[
   {key:"identity",title:"Validar identidade e contexto inicial"},...COMMON_COMPANY,
-  {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
+ {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
+  {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
   {key:"corporate_history",title:"Investigar histórico societário e arquivamentos",source:"jucesp"},
   {key:"mna",title:"Verificar M&A / atos de concentração",source:"cade"},
@@ -33,6 +35,9 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
  ],
  AGRO:[
   {key:"identity",title:"Validar identidade, município e atividade agro"},...COMMON_COMPANY,
+  {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
+  {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
+  {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
   {key:"surname_candidates",title:"Criar pivô de sobrenome/localidade sem confirmar parentesco"},
   {key:"family_validation",title:"Validar candidatos familiares por fontes independentes",source:"web_search"},
   {key:"corporate_history",title:"Investigar histórico societário",source:"jucesp"},
@@ -42,7 +47,8 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
  ],
  MEDICO:[
   {key:"identity",title:"Validar identidade profissional e empresarial"},...COMMON_COMPANY,
-  {key:"cvm",title:"Verificar eventual cadastro em companhias abertas",source:"cvm"},
+ {key:"cvm",title:"Verificar eventual cadastro em companhias abertas",source:"cvm"},
+  {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
   {key:"societies",title:"Expandir sociedades, sócios e administradores"},
   {key:"web_context",title:"Buscar contexto corporativo/profissional complementar",source:"web_search"},
@@ -51,7 +57,8 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
  ],
  GENERICO:[
   {key:"identity",title:"Validar identidade"},...COMMON_COMPANY,
-  {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
+ {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
+  {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
   {key:"relationships",title:"Expandir relações empresariais existentes"},
   {key:"web_context",title:"Buscar contexto público complementar",source:"web_search"},
@@ -143,12 +150,12 @@ Deno.serve(async(req:Request)=>{
       const n=nameCandidates.length;
       await setStep(
         "name_discovery",
-        n>0?"COMPLETED":"PARTIAL",
+        n>0&&data?.complete!==false?"COMPLETED":"PARTIAL",
         n>0
           ? n+" candidato(s) societário(s) ativo(s) encontrado(s) pelo nome ("+high+" com alta aderência contextual, "+medium+" com aderência média)."
           : "Nenhum candidato societário ativo localizado pelo nome nesta fonte; candidatos rejeitados anteriormente não são reabertos automaticamente.",
         undefined,
-        {candidates_found:n,high_confidence:high,medium_confidence:medium}
+        {candidates_found:n,high_confidence:high,medium_confidence:medium,search_lineage:data?.search_lineage||null,complete:data?.complete!==false}
       );
     }else{
       await setStep("name_discovery","FAILED",undefined,data?.error||("HTTP "+resp.status));
@@ -187,12 +194,15 @@ Deno.serve(async(req:Request)=>{
    if(resp.ok&&data?.status==="REVIEW_REQUIRED"){
     await setStep("cnpj_qsa","BLOCKED","A evidência cadastral foi revisada e não está verificada. Nenhum fato ou vínculo foi restaurado automaticamente.",undefined,{evidence_id:data.evidence_id});
    }else if(resp.ok&&data?.company_id){
-    companyId=data.company_id;
+    const attributed=await ensureCompanyResearchLink(admin,lead,orgId,data.company_id,cnpj,data.evidence_id);
+    companyId=attributed?data.company_id:null;
+    if(!attributed){await setStep('cnpj_qsa','BLOCKED','Cadastro consultado, mas atribuição da empresa a este núcleo exige revisão. Nenhum vínculo rejeitado ou identidade pessoal foi confirmado.',undefined,{company_id:data.company_id,evidence_id:data.evidence_id});}
+    else{
     await setStep("cnpj_qsa","COMPLETED","Cadastro consultado via "+(data.provider==='base_empresarial_rfb'?'Base Empresarial (fallback)':'BrasilAPI')+". "+(data.relationship_ids?.length||0)+" relação(ões) de QSA persistida(s) com evidência.",undefined,{company_id:companyId,evidence_id:data.evidence_id,provider:data.provider||'brasilapi_cnpj'});
     if(lead.kind==="COMPANY"){
-      await admin.from("leads").update({identity_status:"SUPPORTED",updated_at:new Date().toISOString()}).eq("id",leadId).eq("organization_id",orgId).neq("identity_status","VERIFIED");
-      identityStatus="SUPPORTED";
-      await setStep("identity","COMPLETED","Identidade jurídica suportada pelo CNPJ consultado e cadastro empresarial persistido.",undefined,{company_id:companyId,cnpj});
+      identityStatus=await persistCompanyIdentitySupport(admin,leadId,orgId);
+      await setStep("identity","COMPLETED",identityStatus==='VERIFIED'?"Confirmação existente da identidade jurídica preservada; cadastro empresarial consultado.":"Identidade jurídica suportada pelo CNPJ consultado e cadastro empresarial persistido.",undefined,{company_id:companyId,cnpj,identity_status:identityStatus});
+    }
     }
    }else await setStep("cnpj_qsa","FAILED",undefined,data?.error||("HTTP "+resp.status));
   }else if(lead.kind==="PERSON"&&identityStatus==="SUPPORTED"){
@@ -243,7 +253,8 @@ Deno.serve(async(req:Request)=>{
     ["public_contracts","pncp-company-contracts"],
     ["federal_transparency","portal-transparencia-company"],
     ["cvm","cvm-company-check"],
-    ["cvm_ipe","cvm-ipe-search"]
+    ["cvm_ipe","cvm-ipe-search"],
+    ["financial_statements","cvm-financial-statements"]
    ] as const;
    let cvmFound:boolean|null=null;
 
@@ -258,8 +269,8 @@ Deno.serve(async(req:Request)=>{
       await setStep(step,"BLOCKED","Fonte "+(configuredSource?.name||def.source)+" ainda não está operacional para execução automática.",undefined,{source_status:configuredSource?.connection_status||"UNKNOWN",action_url:configuredSource?.action_url||null});
       return;
     }
-    if(step==="cvm_ipe"&&cvmFound===false){
-      await setStep(step,"SKIPPED","CNPJ não está no cadastro de companhias abertas consultado; IPE não é aplicável a este CNPJ.");
+    if(['cvm_ipe','financial_statements'].includes(step)&&cvmFound===false){
+      await setStep(step,"SKIPPED","CNPJ não está no cadastro de companhias abertas consultado; fonte CVM documental não executada para este CNPJ.");
       return;
     }
     if(step==="cvm_ipe"){
@@ -289,6 +300,10 @@ Deno.serve(async(req:Request)=>{
     if(!resp.ok){await setStep(step,resp.status===428?"BLOCKED":"FAILED",undefined,data?.error||("HTTP "+resp.status),{action_url:data?.setup_url||null});return}
 
     if(data?.status==='REVIEW_REQUIRED'){await setStep(step,'BLOCKED','Documento aguarda revisão; nenhum fato foi restaurado.');return}
+    if(step==='financial_statements'){
+      const n=Number(data?.facts_found||0),review=Number(data?.review_required||0);
+      await setStep(step,n>0&&data?.complete===true?'COMPLETED':'PARTIAL',review?'Há revisão documental pendente; valores rejeitados ou contraditórios não foram restaurados.':n>0?n+' valor(es) do DFP '+data.year+' consolidado documentado(s), com período, escala, versão e conta oficial. Não representam posição financeira atual.':'Nenhuma conta selecionada localizada no DFP consolidado consultado; situação financeira permanece desconhecida.',undefined,{facts_found:n,year:data?.year,scope:data?.scope,review_required:review,complete:data?.complete===true});
+    }
     if(step==="financial_filings"){
       const n=Number(data?.documents_found||0);
       await setStep(step,n>0&&!data?.truncated?"COMPLETED":"PARTIAL",
@@ -320,17 +335,17 @@ Deno.serve(async(req:Request)=>{
     }
    };
    // Eligibility is a prerequisite, while the other company queries are independent.
-   await runIndependent(connected.filter(([step])=>step!=='cvm_ipe'),async item=>{
+   await runIndependent(connected.filter(([step])=>!['cvm_ipe','financial_statements'].includes(step)),async item=>{
     try{await runConnected(item)}catch(e){await setStep(item[0],'FAILED',undefined,'Consulta interrompida: '+String(e))}
    });
-   if(defs.some(s=>s.key==='cvm_ipe')){
-    try{await runConnected(connected.find(([step])=>step==='cvm_ipe')!)}catch(e){await setStep('cvm_ipe','FAILED',undefined,'Consulta interrompida: '+String(e))}
-   }
+   await runIndependent(connected.filter(([step])=>['cvm_ipe','financial_statements'].includes(step)&&defs.some(s=>s.key===step)),async item=>{
+    try{await runConnected(item)}catch(e){await setStep(item[0],'FAILED',undefined,'Consulta interrompida: '+String(e))}
+   });
   }else{
    const reason=supportedClusterCompanies.length
      ? supportedClusterCompanies.length+" empresa(s) suportada(s) já foram adicionadas ao ecossistema. Fontes profundas específicas de empresa devem rodar por núcleo para evitar escolher uma empresa principal arbitrariamente."
      : "Depende da resolução de uma empresa/CNPJ primeiro.";
-   for(const key of ["financial_filings","bndes_financing","public_contracts","federal_transparency","cvm","cvm_ipe"])if(defs.some(s=>s.key===key))await setStep(key,"BLOCKED",reason,undefined,{supported_company_count:supportedClusterCompanies.length});
+   for(const key of ["financial_filings","financial_statements","bndes_financing","public_contracts","federal_transparency","cvm","cvm_ipe"])if(defs.some(s=>s.key===key))await setStep(key,"BLOCKED",reason,undefined,{supported_company_count:supportedClusterCompanies.length});
   }
 
   if(defs.some(s=>s.key==="web_context")){
@@ -345,7 +360,7 @@ Deno.serve(async(req:Request)=>{
   }
   if(defs.some(s=>s.key==='family_validation'))await setStep('family_validation','BLOCKED','Validação familiar exige fontes independentes e revisão explícita. Sobrenome e localidade não confirmam parentesco.');
 
-  const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","querido_diario","bndes_financing","web_search"]);
+  const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","cvm_dfp","querido_diario","bndes_financing","web_search"]);
   for(const def of defs){
    if(!def.source||automated.has(def.source))continue;
    const src:any=sourceMap.get(def.source);
