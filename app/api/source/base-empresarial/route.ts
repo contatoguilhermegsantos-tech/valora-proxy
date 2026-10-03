@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { request as httpsRequest } from 'node:https'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,6 +9,37 @@ const SOURCE = 'https://app.baseempresarial.com.br/api/v1'
 const DEFAULT_URL = 'https://dczropngwfoxybdmybgw.supabase.co'
 const DEFAULT_KEY = 'sb_publishable_Y65sof58bUDmppRbUwwV4g_yraQyqy3'
 const WRITE_ROLES = new Set(['OWNER', 'ADMIN', 'ANALYST', 'MEMBER'])
+
+// Resolve the source through IPv4 while preserving hostname, SNI and normal TLS validation.
+function publicSource(path: string, timeoutMs: number): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(SOURCE + path, { method: 'GET', family: 4,
+      headers: { Accept: 'application/json', 'User-Agent': 'MAX-Intelligence/1.0' } }, response => {
+      const status = response.statusCode || 502
+      const headers: Record<string, string> = {}
+      if (typeof response.headers['retry-after'] === 'string') headers['Retry-After'] = response.headers['retry-after']
+      if (status !== 200) { clearTimeout(timer); resolve(new Response(null, { status, headers })); response.destroy(); return }
+      const chunks: Uint8Array[] = []
+      let size = 0
+      response.on('data', (chunk: Uint8Array) => {
+        size += chunk.byteLength
+        if (size > 1024 * 1024) request.destroy(new Error('RESPONSE_TOO_LARGE'))
+        else chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('end', () => {
+        const bytes = new Uint8Array(size)
+        let offset = 0
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+        resolve(new Response(bytes, { status, headers }))
+      })
+    })
+    const timer = setTimeout(() => { const error = new Error('SOURCE_TIMEOUT'); error.name = 'TimeoutError'; request.destroy(error) }, timeoutMs)
+    request.on('error', reject)
+    request.on('close', () => clearTimeout(timer))
+    request.end()
+  })
+}
 
 function result(body: unknown, status: number, retryAfter?: string) {
   const headers: Record<string, string> = { 'Cache-Control': 'no-store' }
@@ -83,8 +115,7 @@ export async function POST(req: Request) {
   } else return result({ ok: false, error: 'INVALID_OPERATION' }, 400)
 
   try {
-    const source = await fetch(SOURCE + path, { headers: { Accept: 'application/json', 'User-Agent': 'MAX-Intelligence/1.0' },
-      signal: AbortSignal.timeout(timeout), redirect: 'error', cache: 'no-store' })
+    const source = await publicSource(path, timeout)
     if (!source.ok) {
       const rawRetry = source.headers.get('retry-after') || ''
       const retryAfter = rawRetry.length <= 100 && (/^\d{1,8}$/.test(rawRetry) || Number.isFinite(Date.parse(rawRetry))) ? rawRetry : undefined
