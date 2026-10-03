@@ -4,6 +4,24 @@ import {familyContext,familyNorm,familyStableId,familyQueryFingerprint,familyRes
 import {persistSourceEvidence} from '../_shared/source-evidence.ts';
 const H={'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type','Access-Control-Allow-Methods':'POST, OPTIONS'};
 const reply=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:H});
+const BASE_PROXY='https://valora-proxy-git-max-v1-contatoguilhermegsantos-6547s-projects.vercel.app/api/source/base-empresarial';
+function baseFallback(auth:string){
+ const configured=Deno.env.get('BASE_EMPRESARIAL_PROXY_URL')||BASE_PROXY;
+ // Forward the verified user's bearer only to this owned branch endpoint.
+ if(configured!==BASE_PROXY)return undefined;
+ return async(path:string,valid:(d:any)=>boolean,options:{timeoutMs:number})=>{
+  const url=new URL(path,'https://app.baseempresarial.com.br/api/v1'),basic=path.match(/^\/companies\/([A-Z0-9]{8})$/)?.[1];let body:any;
+  if(url.pathname==='/companies/search'&&/^\d{7}$/.test(url.searchParams.get('city_id')||'')&&/^\d+$/.test(url.searchParams.get('page')||''))body={operation:'companies_search',city_id:url.searchParams.get('city_id'),page:Number(url.searchParams.get('page')),timeout_ms:Math.max(1000,options.timeoutMs-500)};
+  else if(basic)body={operation:'company_detail',basic_cnpj:basic,timeout_ms:Math.max(1000,options.timeoutMs-500)};
+  else return {ok:false,status:400,data:null,error:'UNSUPPORTED_OPERATION'};
+  try{
+   const response=await fetch(configured,{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(options.timeoutMs)});
+   if(!response.ok){const header=response.headers.get('Retry-After')||'60',retry=/^\d+$/.test(header)?Number(header):Math.max(0,(Date.parse(header)-Date.now())/1000)||60;await response.body?.cancel();return {ok:false,status:response.status,data:null,error:'HTTP_'+response.status,retry_after_seconds:response.status===429?retry:undefined}}
+   let data:any;try{data=await response.json()}catch{return {ok:false,status:response.status,data:null,error:'INVALID_RESPONSE'}}
+   return valid(data)?{ok:true,status:response.status,data,error:null}:{ok:false,status:response.status,data:null,error:'INVALID_RESPONSE'};
+  }catch(e){return {ok:false,status:null,data:null,error:e instanceof Error&&['AbortError','TimeoutError'].includes(e.name)?'TIMEOUT':'NETWORK_ERROR'}}
+ };
+}
 Deno.serve(async(req:Request)=>{
  if(req.method==='OPTIONS')return reply({ok:true});if(req.method!=='POST')return reply({error:'POST required'},405);
  const auth=req.headers.get('Authorization');if(!auth)return reply({error:'Unauthorized'},401);
@@ -31,7 +49,7 @@ Deno.serve(async(req:Request)=>{
   const pivotId=previous?.id||await familyStableId(`family-pivot|${org}|${leadId}`);
   const fingerprint=context.ok?await familyQueryFingerprint(context):null,sourceAvailable=source.data&&['CONNECTED','CONNECTED_LIMITED'].includes(source.data.connection_status);
   const progress=raw.restart===true?{}:previous?.metadata||{};
-  let result:any=context.ok&&sourceAvailable?await discoverFamilyContext(context,progress):{status:'BLOCKED',complete:false,candidates:[],state:context.ok?await familyResumeState(context,progress):{},search_lineage:{original:{name:lead.data.name,city:lead.data.city,state:lead.data.state,segment:lead.data.segment}},notes:[context.ok?'SOURCE_NOT_AVAILABLE':context.reason],continuation:false,qsa_reads:0};
+  let result:any=context.ok&&sourceAvailable?await discoverFamilyContext(context,progress,{baseFallback:baseFallback(auth)}):{status:'BLOCKED',complete:false,candidates:[],state:context.ok?await familyResumeState(context,progress):{},search_lineage:{original:{name:lead.data.name,city:lead.data.city,state:lead.data.state,segment:lead.data.segment}},notes:[context.ok?'SOURCE_NOT_AVAILABLE':context.reason],continuation:false,qsa_reads:0};
   const candidates:any[]=[];let reviewsBlocked=0;
   for(const match of result.candidates){
    const label=match.entity_type==='PERSON'?match.person_name:match.company_name;
@@ -55,7 +73,7 @@ Deno.serve(async(req:Request)=>{
   const pivotPayload={id:pivotId,organization_id:org,lead_id:leadId,research_run_id:runId,entity_type:'GROUP',label:`Pivô de sobrenome ${context.ok?context.surname:'a validar'} em ${lead.data.city||'município a validar'}`,candidate_reason:'Busca contextual empresarial. Sobrenome, localidade e segmento não comprovam parentesco.',candidate_type:'FAMILY_SEARCH_PIVOT',confidence:'LOW',validation_status:'UNVALIDATED',metadata,created_by:user.id};
   if(!previous){const insert=await admin.from('candidate_entities').upsert(pivotPayload,{onConflict:'id',ignoreDuplicates:true});if(insert.error)throw new Error('Could not persist search pivot')}
   const updated=await admin.from('candidate_entities').update({metadata,research_run_id:runId}).eq('id',pivotId).eq('organization_id',org).eq('lead_id',leadId).eq('validation_status','UNVALIDATED').select('*').maybeSingle();if(updated.error||!updated.data)throw new Error('Pivot review prevents progress update');
-  const log=await admin.from('source_fetch_logs').insert({organization_id:org,research_run_id:runId,source_registry_id:source.data?.id||null,endpoint_reference:'Base Empresarial locations -> companies/search city_id -> companies/{basic}/QSA',success:['COMPLETED','PARTIAL'].includes(result.status),http_status:result.status==='FAILED'?null:200,result_status:'FAMILY_CONTEXT_'+result.status,duration_ms:Date.now()-started,created_by:user.id});if(log.error)throw new Error('Could not persist discovery result');
+  const log=await admin.from('source_fetch_logs').insert({organization_id:org,research_run_id:runId,source_registry_id:source.data?.id||null,endpoint_reference:'IBGE municipalities or Base geography -> Base companies/search city_id -> companies/{basic}/QSA',success:['COMPLETED','PARTIAL'].includes(result.status),http_status:result.status==='FAILED'?null:200,result_status:'FAMILY_CONTEXT_'+result.status,duration_ms:Date.now()-started,created_by:user.id});if(log.error)throw new Error('Could not persist discovery result');
   return reply({ok:result.status!=='FAILED',status:result.status,complete:result.complete,candidates_found:candidatesFound,candidates,search_lineage:result.search_lineage,pivot:updated.data,note:'Pistas cadastrais da empresa; parentesco, residência e identidade individual não confirmados.'},result.status==='FAILED'?502:200);
  }catch{return reply({ok:false,status:'FAILED',complete:false,error:'Could not complete or persist contextual discovery; previous reviews preserved'},500)}
 });

@@ -1,5 +1,6 @@
 import {fetchSourceJson} from './source-operations.ts';
 const API='https://app.baseempresarial.com.br/api/v1';
+const IBGE='https://servicodados.ibge.gov.br/api/v1/localidades';
 export const familyNorm=(v:unknown)=>String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
 const cnpj=(v:unknown)=>String(v??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 const cnae=(v:unknown)=>{const s=String(v??'').replace(/\D/g,'');return s&&s.length<=7?s.padStart(7,'0'):''};
@@ -21,7 +22,11 @@ export function familyContext(lead:any,strategy?:unknown){
 type Context=Extract<ReturnType<typeof familyContext>,{ok:true}>;
 export type FamilyCompany={full_cnpj:string;basic_cnpj:string;company_name:string;city:string;state:string;cnae_code:string;cnae_description:string;attempts?:number};
 type Match=FamilyCompany&{entity_type:'PERSON'|'COMPANY';person_name?:string;match_basis:'QSA_PERSON'|'COMPANY_NAME';partner_role?:string};
-export type FamilyState={query_fingerprint:string;scanned_cnpjs:string[];scanned_count:number;next_page:number|null;backlog:FamilyCompany[];listing_exhausted:boolean;qsa_incomplete_roots:string[];candidate_limit_reached:boolean;coverage_incomplete:boolean;retry_not_before:string|null;city_code:string|null;pages_scanned:number;last_error?:string|null};
+type GeographyProvider='IBGE_LOCALIDADES'|'BASE_EMPRESARIAL';
+export type FamilySourceResult={ok:boolean;status:number|null;data:any;error:string|null;retry_after_seconds?:number};
+export type FamilyBaseFallback=(path:string,validator:(d:any)=>boolean,options:{timeoutMs:number})=>Promise<FamilySourceResult>;
+type SourceAttempt={provider:GeographyProvider;transport:'DIRECT'|'AUTHENTICATED_BRIDGE';endpoint:string;status:number|null;error:string|null;duration_ms:number};
+export type FamilyState={query_fingerprint:string;scanned_cnpjs:string[];scanned_count:number;next_page:number|null;backlog:FamilyCompany[];listing_exhausted:boolean;qsa_incomplete_roots:string[];candidate_limit_reached:boolean;coverage_incomplete:boolean;retry_not_before:string|null;city_code:string|null;pages_scanned:number;last_error?:string|null;geography_provider?:GeographyProvider;geography_preprocessor?:{provider:GeographyProvider;source_url:string;municipality_code:string;municipality_name:string;state:string;validation:'EXACT_CITY_UF';queried_at:string|null};source_attempts?:SourceAttempt[]};
 const hasSurname=(name:unknown,surname:string)=>familyNorm(name).split(' ').includes(surname);
 const activity=(code:string,rule:Context['segment_rule'])=>rule.codes.includes(code)||rule.prefixes.some(p=>code.startsWith(p));
 function safeCompany(raw:any,context:Context,cityCode?:string):FamilyCompany|null{
@@ -39,18 +44,32 @@ export async function familyResumeState(context:Context,previous:any={}):Promise
  const same=previous?.query_fingerprint===fingerprint;
  const state:FamilyState={query_fingerprint:fingerprint,scanned_cnpjs:same&&Array.isArray(previous.scanned_cnpjs)?[...new Set<string>(previous.scanned_cnpjs.map(cnpj).filter((v:string)=>/^[A-Z0-9]{12}\d{2}$/.test(v)))].slice(-500):[],scanned_count:same?Math.max(Number(previous.scanned_count)||0,Array.isArray(previous.scanned_cnpjs)?previous.scanned_cnpjs.length:0):0,next_page:same&&(previous.next_page===null||Number.isInteger(previous.next_page)&&previous.next_page>0)?previous.next_page:1,backlog:[],listing_exhausted:same&&previous.listing_exhausted===true,qsa_incomplete_roots:same&&Array.isArray(previous.qsa_incomplete_roots)?previous.qsa_incomplete_roots.map(cnpj).filter((s:string)=>s.length===8).slice(0,500):[],city_code:same&&/^\d{7}$/.test(String(previous.city_code))?String(previous.city_code):null,pages_scanned:same?Number(previous.pages_scanned)||0:0,candidate_limit_reached:same&&previous.candidate_limit_reached===true,coverage_incomplete:same&&previous.coverage_incomplete===true,retry_not_before:same&&Number.isFinite(Date.parse(previous.retry_not_before))?previous.retry_not_before:null,last_error:null};
  if(same&&Array.isArray(previous.backlog))state.backlog=previous.backlog.map((r:any)=>safeCompany(r,context,state.city_code||undefined)).filter(Boolean).slice(0,500) as FamilyCompany[];
+ if(same&&state.city_code&&['IBGE_LOCALIDADES','BASE_EMPRESARIAL'].includes(previous.geography_provider)){state.geography_provider=previous.geography_provider;state.geography_preprocessor={provider:state.geography_provider!,source_url:state.geography_provider==='IBGE_LOCALIDADES'?`${IBGE}/estados/${context.state}/municipios`:`${API}/locations/cities`,municipality_code:state.city_code,municipality_name:context.city,state:context.state,validation:'EXACT_CITY_UF',queried_at:Number.isFinite(Date.parse(previous.geography_preprocessor?.queried_at))?previous.geography_preprocessor.queried_at:null}}
+ state.source_attempts=[];
  return state;
 }
-export async function discoverFamilyContext(context:Context,previous:any={},options:{fetcher?:typeof fetch;now?:()=>number;deadlineMs?:number}={}){
+export async function discoverFamilyContext(context:Context,previous:any={},options:{fetcher?:typeof fetch;baseFallback?:FamilyBaseFallback;now?:()=>number;deadlineMs?:number}={}){
  const clock=options.now||Date.now,started=clock(),deadline=started+(options.deadlineMs||45000),fetcher=options.fetcher||fetch,state=await familyResumeState(context,previous);
- const matches:Match[]=[],notes:string[]=[];let failed=false,reviewIncomplete=false,qsaReads=0,rateLimited=false;
+ const matches:Match[]=[],notes:string[]=[];let failed=false,reviewIncomplete=false,qsaReads=0,rateLimited=false,preferBridge=false;let directFailure:FamilySourceResult|null=null;
  async function read(path:string,valid:(d:any)=>boolean){
+  const official=path.startsWith(IBGE+'/'),bridgeEligible=!official&&path.startsWith('/companies/'),provider:GeographyProvider=official?'IBGE_LOCALIDADES':'BASE_EMPRESARIAL';
+  const endpoint=official?'IBGE /estados/{UF}/municipios':path.startsWith('/companies/search')?'BASE /companies/search':path.startsWith('/companies/')?'BASE /companies/{basic_cnpj}':path.includes('/cities/stats')?'BASE /locations/states/{ibge}/cities/stats':path.startsWith('/locations/cities')?'BASE /locations/cities':'BASE /locations/states';
   const remaining=deadline-clock();if(remaining<1200){notes.push('DEADLINE');return {ok:false,data:null,status:null,error:'DEADLINE'}}
   if(rateLimited)return {ok:false,data:null,status:429,error:'HTTP_429'};
-  const result=await fetchSourceJson(API+path,valid,{fetcher:async(url,init)=>{const response=await fetcher(url,init);if(response.status===429){const header=response.headers.get('Retry-After')||'60',seconds=/^\d+$/.test(header)?Number(header):Math.max(0,(Date.parse(header)-clock())/1000)||60;if(seconds>2){rateLimited=true;state.retry_not_before=new Date(clock()+seconds*1000).toISOString()}}return response},timeoutMs:Math.min(6000,Math.max(300,Math.floor((remaining-600)/2))),headers:{'User-Agent':'MAX-Intelligence/1.0'}});
+  async function bridge(){
+   const bridgeStarted=clock();let result:FamilySourceResult;
+   try{result=await options.baseFallback!(path,valid,{timeoutMs:Math.min(8000,Math.max(300,deadline-clock()-600))});if(result.ok&&!valid(result.data))result={ok:false,status:result.status,data:null,error:'INVALID_RESPONSE'}}catch{result={ok:false,status:null,data:null,error:'NETWORK_ERROR'}}
+   state.source_attempts!.push({provider,transport:'AUTHENTICATED_BRIDGE',endpoint,status:result.status,error:result.error,duration_ms:Math.max(0,clock()-bridgeStarted)});
+   if(result.status===429){rateLimited=true;state.retry_not_before=new Date(clock()+Math.max(1,Number(result.retry_after_seconds)||60)*1000).toISOString();notes.push('RATE_LIMIT_RETRY_AFTER')}
+   return result;
+  }
+  if(bridgeEligible&&preferBridge&&options.baseFallback){const bridged=await bridge();if(bridged.ok)return bridged;notes.push('BASE_AUTHENTICATED_BRIDGE_FAILED');return bridged.status===429?bridged:directFailure!}
+  const queryStarted=clock(),result=await fetchSourceJson(official?path:API+path,valid,{fetcher:async(url,init)=>{const response=await fetcher(url,init);if(!official&&response.status===429){const header=response.headers.get('Retry-After')||'60',seconds=/^\d+$/.test(header)?Number(header):Math.max(0,(Date.parse(header)-clock())/1000)||60;if(seconds>2){rateLimited=true;state.retry_not_before=new Date(clock()+seconds*1000).toISOString()}}return response},timeoutMs:Math.min(official?4000:6000,Math.max(300,Math.floor((remaining-600)/2))),headers:{'User-Agent':'MAX-Intelligence/1.0'}});
+  state.source_attempts!.push({provider,transport:'DIRECT',endpoint,status:result.status,error:result.error,duration_ms:Math.max(0,clock()-queryStarted)});
+  if(bridgeEligible&&!result.ok&&['TIMEOUT','NETWORK_ERROR'].includes(result.error||'')&&options.baseFallback&&deadline-clock()>1200){const bridged=await bridge();if(bridged.ok){preferBridge=true;directFailure=result;notes.push('BASE_AUTHENTICATED_BRIDGE_USED');return bridged}notes.push('BASE_AUTHENTICATED_BRIDGE_FAILED');if(bridged.status===429)return bridged}
   if(result.status===429)notes.push('RATE_LIMIT_RETRY_AFTER');return result;
  }
- function lineage(){return {original:{name:context.lead_name,city:context.city,state:context.state,segment:context.segment},query_surname:context.surname,geographic_filter_applied:Boolean(state.city_code),city_code:state.city_code,geography_scope:'COMPANY_ESTABLISHMENT',segment_rule:context.segment_rule,segment_filter_applied:'CLIENT_CNAE_VALIDATION',transformations:['NAME_NORMALIZATION','SURNAME_TOKEN','EXACT_CITY_STATE_RESOLUTION','CITY_COMPANY_SCAN','CNAE_CLIENT_VALIDATION'],coverage:'Estabelecimentos no município consultado; nome empresarial e QSA são pistas, sem confirmar parentesco ou residência.'}}
+ function lineage(){return {original:{name:context.lead_name,city:context.city,state:context.state,segment:context.segment},query_surname:context.surname,geographic_filter_applied:Boolean(state.city_code),city_code:state.city_code,geography_provider:state.geography_provider||null,geography_preprocessor:state.geography_preprocessor||null,source_attempts:state.source_attempts,geography_scope:'COMPANY_ESTABLISHMENT',segment_rule:context.segment_rule,segment_filter_applied:'CLIENT_CNAE_VALIDATION',transformations:['NAME_NORMALIZATION','SURNAME_TOKEN','EXACT_CITY_STATE_RESOLUTION','CITY_COMPANY_SCAN','CNAE_CLIENT_VALIDATION'],coverage:'Estabelecimentos no município consultado; nome empresarial e QSA são pistas, sem confirmar parentesco ou residência.'}}
  function finish(blocked=false){
   state.last_error=notes.at(-1)||null;
   state.coverage_incomplete=state.coverage_incomplete||reviewIncomplete;
@@ -61,6 +80,14 @@ export async function discoverFamilyContext(context:Context,previous:any={},opti
  if(state.retry_not_before&&Date.parse(state.retry_not_before)>clock()){notes.push('RATE_LIMIT_RETRY_AFTER');return finish()}
  state.retry_not_before=null;
  if(!state.city_code){
+  const official=await read(`${IBGE}/estados/${context.state}/municipios`,d=>Array.isArray(d));
+  if(official.ok){
+   const cities=official.data.filter((r:any)=>{const uf=r?.microrregiao?.mesorregiao?.UF||r?.['regiao-imediata']?.['regiao-intermediaria']?.UF;return familyNorm(r?.nome)===familyNorm(context.city)&&uf?.sigla===context.state&&/^\d{7}$/.test(String(r.id))&&(!uf.id||String(r.id).startsWith(String(uf.id)))});
+   if(cities.length!==1){notes.push('IBGE_CITY_NOT_UNIQUELY_RESOLVED');return finish(true)}
+   state.city_code=String(cities[0].id);state.geography_provider='IBGE_LOCALIDADES';state.geography_preprocessor={provider:'IBGE_LOCALIDADES',source_url:`${IBGE}/estados/${context.state}/municipios`,municipality_code:state.city_code,municipality_name:text(cities[0].nome,120),state:context.state,validation:'EXACT_CITY_UF',queried_at:new Date(clock()).toISOString()};
+  }else notes.push('IBGE_GEOGRAPHY_FALLBACK');
+ }
+ if(!state.city_code){
   const uf=await read('/locations/states?filter%5Babbreviation%5D='+encodeURIComponent(context.state),d=>Array.isArray(d?.data));
   if(!uf.ok){failed=true;notes.push('STATE_QUERY_FAILED');return finish()}
   const states=uf.data.data.filter((r:any)=>text(r.abbreviation,2).toUpperCase()===context.state&&/^\d{2}$/.test(String(r.ibge_code)));
@@ -70,7 +97,7 @@ export async function discoverFamilyContext(context:Context,previous:any={},opti
   if(!cityResult.ok){failed=true;notes.push('CITY_QUERY_FAILED');return finish()}
   let cities=cityResult.data.data.filter((r:any)=>familyNorm(r.name)===familyNorm(context.city)&&String(r.ibge_code).startsWith(ufCode)&&/^\d{7}$/.test(String(r.ibge_code)));
   if(!cities.length){cityResult=await read('/locations/states/'+ufCode+'/cities/stats?q='+encodeURIComponent(familyNorm(context.city)),d=>Array.isArray(d?.data));if(!cityResult.ok){failed=true;notes.push('CITY_QUERY_FAILED');return finish()}cities=cityResult.data.data.filter((r:any)=>familyNorm(r.name)===familyNorm(context.city)&&String(r.ibge_code).startsWith(ufCode)&&/^\d{7}$/.test(String(r.ibge_code)))}
-  if(cities.length!==1){notes.push('CITY_NOT_UNIQUELY_RESOLVED');return finish(true)}state.city_code=String(cities[0].ibge_code);
+  if(cities.length!==1){notes.push('CITY_NOT_UNIQUELY_RESOLVED');return finish(true)}state.city_code=String(cities[0].ibge_code);state.geography_provider='BASE_EMPRESARIAL';state.geography_preprocessor={provider:'BASE_EMPRESARIAL',source_url:API+'/locations/cities',municipality_code:state.city_code,municipality_name:text(cities[0].name,120),state:context.state,validation:'EXACT_CITY_UF',queried_at:new Date(clock()).toISOString()};
  }
  const scanned=new Set(state.scanned_cnpjs),pending=new Map(state.backlog.map(c=>[c.full_cnpj,c]));
  // Drain saved companies before fetching more pages, so continuation does not grow without bound.
