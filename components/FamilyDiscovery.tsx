@@ -25,6 +25,7 @@ type Document = {
  verification_status?: string
  source_registry_id?: string
  source_url?: string
+ source_label?: string
  title?: string
  retrieved_at?: string
 }
@@ -41,6 +42,23 @@ const normalized = (value: unknown) => text(value).normalize('NFD').replace(/[\u
 const uuid = (value: unknown) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 const companyId = (value: unknown) => text(value).toUpperCase().replace(/[^A-Z0-9]/g, '')
 const count = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
+function providerCode(value: unknown) {
+ const provider = text(value).toUpperCase()
+ return provider === 'BASE_EMPRESARIAL' || provider === 'MINHA_RECEITA' ? provider : ''
+}
+function providerLabel(provider: string) {
+ return provider === 'BASE_EMPRESARIAL' ? 'Base Empresarial' : provider === 'MINHA_RECEITA' ? 'Minha Receita — consulta experimental' : ''
+}
+function documentProvider(document: Document | undefined, metadata: Record<string, any>) {
+ const label = normalized(document?.source_label).replace(/\s/g, '')
+ if (label.includes('MINHARECEITA')) return 'MINHA_RECEITA'
+ if (label.includes('BASEEMPRESARIAL')) return 'BASE_EMPRESARIAL'
+ return providerCode(metadata.business_provider || metadata.source_provider || metadata.search_lineage?.business_provider || metadata.search_lineage?.source_provider)
+}
+function sourceMonth(value: unknown) {
+ const month = text(value)
+ return /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? `${month.slice(5)}/${month.slice(0, 4)}` : ''
+}
 function sourceUrl(value: unknown) {
  try {
   const url = new URL(text(value))
@@ -77,6 +95,10 @@ const limits: Record<string, string> = {
  INVALID_QSA_ROW: 'Alguns nomes do quadro societário vieram com dados incompletos.',
  CANDIDATE_COVERAGE_LIMIT_60: 'Esta rodada registra até 60 pistas. O resultado exige um recorte mais específico para ampliar a análise.',
  RATE_LIMIT_RETRY_AFTER: 'A fonte limitou as consultas. Aguarde a janela indicada antes de continuar.',
+ MINHA_COMPANY_PAGE_QUERY_FAILED: 'Uma página da consulta experimental Minha Receita não pôde ser consultada.',
+ INVALID_QSA_ROWS: 'Alguns cadastros vieram sem um quadro societário utilizável.',
+ CURSOR_DID_NOT_ADVANCE: 'A fonte não avançou para uma nova página. A cobertura permanece parcial.',
+ SOURCE_PROVIDER_SWITCH_RESTARTED: 'A consulta seguiu por outra fonte cadastral, preservando as pistas anteriores.',
 }
 async function describeError(error: any, fallback: string) {
  const status = error?.context?.status
@@ -120,6 +142,9 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
  const pivot = [...pivots].sort((a, b) => text(b.updated_at || b.created_at).localeCompare(text(a.updated_at || a.created_at)))[0]
  const metadata = pivot?.metadata || {}
  const lineage = metadata.search_lineage || {}
+ const businessProvider = providerCode(metadata.business_provider || lineage.business_provider || metadata.source_provider || lineage.source_provider)
+ const minhaReceita = businessProvider === 'MINHA_RECEITA'
+ const businessDataMonth = sourceMonth(metadata.source_data_month || lineage.source_data_month)
  const original = lineage.original || {}
  const query = metadata.query || {}
  const surname = text(metadata.surname || metadata.query_surname || query.surname || lineage.query_surname)
@@ -146,7 +171,9 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
  const noteCodes = Array.isArray(metadata.notes) ? metadata.notes.filter((note: unknown): note is string => typeof note === 'string') : []
  const knownLimits = [...new Set([...noteCodes.map((note: string) => limits[note] || (/\s/.test(note) && !/^[A-Z_ ]+$/.test(note) ? note : '')).filter(Boolean), ...(metadata.candidate_limit_reached === true ? [limits.CANDIDATE_COVERAGE_LIMIT_60] : []), ...(metadata.coverage_incomplete === true && !noteCodes.some((note: string) => ['INVALID_COMPANY_ROW', 'INVALID_QSA_ROW', 'QSA_COVERAGE_LIMIT'].includes(note)) ? ['Parte dos dados da fonte continua incompleta neste recorte.'] : [])])]
  const scanLimit = count(metadata.coverage_limits?.company_scan_limit)
- const qsaLimit = count(metadata.coverage_limits?.qsa_roots_per_run)
+ const qsaLimit = minhaReceita ? null : count(metadata.coverage_limits?.qsa_roots_per_run)
+ const pagesPerQuery = count(metadata.coverage_limits?.pages_per_run)
+ const companiesPerPage = count(metadata.coverage_limits?.companies_per_page)
  const contextMissing = !text(lead.name) || !text(lead.city) || !text(lead.state) || !text(lead.segment)
  const groups = new Map<string, Row[]>()
  for (const candidate of candidates) {
@@ -247,6 +274,8 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
   <div className="banner section">
    <div className="pill-row"><span className="badge pending">{busy === 'search' ? 'Consultando contexto…' : statusLabel(searchStatus, complete, Boolean(pivot))}</span><span className="badge pending">Rede candidata</span></div>
    <p><strong>Sobrenome:</strong> {surname || 'Definido pela consulta'} · <strong>Município/UF:</strong> {[city, state].filter(Boolean).join('/') || 'A informar'} · <strong>Atividade:</strong> {segment || 'A informar'}</p>
+   {businessProvider && <p className="micro"><strong>Fonte desta consulta:</strong> {providerLabel(businessProvider)}{businessDataMonth ? ` · Base cadastral: ${businessDataMonth}` : ''}.</p>}
+   {minhaReceita && <p className="caution micro">Minha Receita oferece uma consulta experimental por páginas de dados cadastrais mensais. Sua cobertura permanece parcial, mesmo após consultar as páginas disponíveis. Ela e a Base Empresarial retransmitem dados públicos do CNPJ/RFB; a coincidência entre ambas não é uma confirmação por fonte independente.</p>}
    <div className="micro">{scannedCount} estabelecimento(s) consultado(s) · {foundCount} pista(s) registrada(s) · {candidates.length} em análise · {rejected.length} descartada(s)</div>
    {reportedCount != null && reportedCount !== candidates.length && <p className="micro">A fonte informa {reportedCount} pista(s) acumulada(s); a lista abaixo mostra somente o contexto atual.</p>}
    {lastQuery && <p className="micro">Última consulta: {lastQuery} (horário de Brasília).</p>}
@@ -254,7 +283,9 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
    {pivot && !complete && <p className="micro">Cobertura parcial: o resultado não representa todas as empresas ou pessoas deste contexto.{continuation ? ' Há consulta pendente que pode ser continuada.' : ' Confira os limites da fonte antes de reconsultar.'}</p>}
    {knownLimits.length > 0 && <ul className="micro">{knownLimits.map(limit => <li key={limit}>{limit}</li>)}</ul>}
    {dateLabel(metadata.retry_not_before) && <p className="micro">A fonte permite nova tentativa a partir de {dateLabel(metadata.retry_not_before)} (horário de Brasília).</p>}
-   {(scanLimit != null || qsaLimit != null) && <p className="micro">Limites deste recorte: {scanLimit != null ? `até ${scanLimit} estabelecimentos` : 'estabelecimentos conforme disponibilidade da fonte'}{qsaLimit != null ? `; até ${qsaLimit} quadros societários por consulta` : ''}.</p>}
+   {(pagesPerQuery != null || companiesPerPage != null) && <p className="micro">Limites por consulta: {pagesPerQuery != null ? `até ${pagesPerQuery} página(s)` : 'páginas conforme disponibilidade da fonte'}{companiesPerPage != null ? `, com até ${companiesPerPage} estabelecimentos por página` : ''}{qsaLimit != null ? `; até ${qsaLimit} quadros societários` : ''}.{minhaReceita ? ' O quadro societário é lido junto com o cadastro de cada empresa.' : ''}</p>}
+   {minhaReceita && continuation && <p className="micro">Há páginas pendentes. Continuar busca retoma a próxima página disponível e preserva as pistas já registradas.</p>}
+   {(scanLimit != null || qsaLimit != null && pagesPerQuery == null && companiesPerPage == null) && <p className="micro">Limites deste recorte: {scanLimit != null ? `até ${scanLimit} estabelecimentos` : 'estabelecimentos conforme disponibilidade da fonte'}{qsaLimit != null && pagesPerQuery == null && companiesPerPage == null ? `; até ${qsaLimit} quadros societários por consulta` : ''}.</p>}
    {contextMissing && <p className="micro">Informe nome, município, UF e segmento/CNAE no lead para consultar este contexto.</p>}
    {(earlierContextCount > 0 || allPivots.length > pivots.length) && <p className="micro">{earlierContextCount > 0 ? `${earlierContextCount} pista(s) de recortes anteriores ou sem contexto completo` : 'Consultas de recortes anteriores'} permanecem preservadas no histórico. Elas não são apresentadas como resultados do contexto atual.</p>}
    <div className="actions"><button className="btn secondary" type="button" disabled={readOnly || Boolean(busy) || contextMissing} onClick={discover}>{busy === 'search' ? 'Consultando…' : continuation ? 'Continuar busca por contexto' : hasActualQuery ? 'Consultar novamente' : 'Buscar por contexto'}</button></div>
@@ -273,6 +304,8 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
      {rows.map(candidate => {
       const candidateMetadata = candidate.metadata || {}
       const document = evidence.get(text(candidateMetadata.evidence_id))
+      const candidateProvider = documentProvider(document, candidateMetadata)
+      const candidateSourceLabel = text(document?.source_label) || providerLabel(candidateProvider)
       const verified = documentarySupport(candidate)
       const url = sourceUrl(document?.source_url) || sourceUrl(candidateMetadata.source_url)
       const isPerson = candidateMetadata.match_basis === 'QSA_PERSON' && candidate.entity_type === 'PERSON' && Boolean(text(candidateMetadata.person_name))
@@ -283,6 +316,8 @@ export function FamilyDiscovery({dossier, onUpdated}: {dossier: Dossier; onUpdat
        <details>
         <summary className="source-link">Documento e contexto da pista</summary>
         <p className="micro">{document?.title || 'Documento cadastral da empresa'} · {verified ? 'Documento verificado; parentesco permanece não confirmado.' : 'Documento pendente, indisponível ou requer revisão.'}</p>
+        {candidateSourceLabel && <p className="micro">Fonte deste documento: {candidateSourceLabel}.</p>}
+        {candidateProvider === 'MINHA_RECEITA' && <p className="micro">Consulta cadastral experimental, com origem nos dados públicos do CNPJ/RFB. Não equivale a uma confirmação independente de identidade ou parentesco.</p>}
         {dateLabel(document?.retrieved_at) && <p className="micro">Consultado em {dateLabel(document?.retrieved_at)} (horário de Brasília).</p>}
         <p className="micro">Critério: {candidateMetadata.match_basis === 'QSA_PERSON' ? 'sobrenome no nome de participante do QSA' : candidateMetadata.match_basis === 'COMPANY_NAME' ? 'sobrenome no nome empresarial' : 'coincidência contextual a revisar'}; município/UF e atividade do estabelecimento comparados ao recorte pesquisado.</p>
         {text(candidateMetadata.search_lineage?.coverage) && <p className="micro">{text(candidateMetadata.search_lineage.coverage)}</p>}

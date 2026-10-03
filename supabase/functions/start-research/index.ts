@@ -129,6 +129,9 @@ Deno.serve(async(req:Request)=>{
  const setStep=async(key:string,status:string,summary?:string,error?:string,extra:any={})=>{
   const route=routes.find(r=>r.steps.includes(key));
   const patch:any={status,result_summary:summary||null,error_summary:error||null,metadata:{...(route?{source_route:route}:{}),...extra}};
+  if(key==='surname_candidates'&&['base_empresarial_rfb','minha_receita_rfb'].includes(extra.provider)){
+   const actualSource:any=sourceMap.get(extra.provider);patch.source_key=extra.provider;patch.action_url=actualSource?.action_url||null;
+  }
   if(status==="RUNNING")patch.started_at=new Date().toISOString();
   if(["COMPLETED","PARTIAL","BLOCKED","FAILED","SKIPPED"].includes(status))patch.finished_at=new Date().toISOString();
   const {error:stepError}=await admin.from("research_steps").update(patch).eq("research_run_id",run.id).eq("step_key",key);
@@ -235,7 +238,8 @@ Deno.serve(async(req:Request)=>{
     const {resp,data}=await callFn(url,auth,'family-cluster-discovery',{lead_id:leadId,research_run_id:run.id});
     if(resp.ok){
      const state=data?.status==='BLOCKED'?'BLOCKED':data?.status==='FAILED'?'FAILED':data?.complete===true?'COMPLETED':'PARTIAL';
-     await setStep('surname_candidates',state,data?.note||((data?.candidates_found||0)+' pista(s) por sobrenome e contexto empresarial. '+(data?.complete?'Recorte consultado encerrado; ausência de pistas não prova ausência de grupo familiar.':'Consulta parcial; continue a busca para ampliar o recorte.')),undefined,{candidates_found:data?.candidates_found||0,complete:data?.complete===true,search_lineage:data?.search_lineage||null,pivot_id:data?.pivot?.id||null});
+     const provider=data?.provider==='minha_receita_rfb'||data?.search_lineage?.business_provider==='MINHA_RECEITA'?'minha_receita_rfb':'base_empresarial_rfb';
+     await setStep('surname_candidates',state,data?.note||((data?.candidates_found||0)+' pista(s) por sobrenome e contexto empresarial. '+(data?.complete?'Recorte consultado encerrado; ausência de pistas não prova ausência de grupo familiar.':'Consulta parcial; continue a busca para ampliar o recorte.')),undefined,{provider,candidates_found:data?.candidates_found||0,complete:data?.complete===true,search_lineage:data?.search_lineage||null,pivot_id:data?.pivot?.id||null});
     }else await setStep('surname_candidates','FAILED',undefined,data?.error||('HTTP '+resp.status));
    }
   }
