@@ -21,9 +21,14 @@ const COMMON_COMPANY:StepDef[]=[
  {key:"federal_transparency",title:"Consultar contratos e registros administrativos federais",source:"portal_transparencia"}
 ];
 
+const COMMON_FAMILY:StepDef[]=[
+ {key:'surname_candidates',title:'Buscar pistas por sobrenome, município e segmento',source:'base_empresarial_rfb'},
+ {key:'family_validation',title:'Validar parentesco por documentos independentes'}
+];
+
 const STRATEGIES:Record<Strategy,StepDef[]>={
  EMPRESARIO:[
-  {key:"identity",title:"Validar identidade e contexto inicial"},...COMMON_COMPANY,
+  {key:"identity",title:"Validar identidade e contexto inicial"},...COMMON_COMPANY,...COMMON_FAMILY,
  {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
   {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
@@ -34,19 +39,17 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
   {key:"signals",title:"Derivar sinais consultivos somente a partir de evidências"}
  ],
  AGRO:[
-  {key:"identity",title:"Validar identidade, município e atividade agro"},...COMMON_COMPANY,
+  {key:"identity",title:"Validar identidade, município e atividade agro"},...COMMON_COMPANY,...COMMON_FAMILY,
   {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
   {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
-  {key:"surname_candidates",title:"Criar pivô de sobrenome/localidade sem confirmar parentesco"},
-  {key:"family_validation",title:"Validar candidatos familiares por fontes independentes",source:"web_search"},
   {key:"corporate_history",title:"Investigar histórico societário",source:"jucesp"},
   {key:"web_context",title:"Buscar contexto agro/corporativo complementar",source:"web_search"},
   {key:"events",title:"Consolidar eventos econômicos e questões investigativas"},
   {key:"signals",title:"Derivar sinais consultivos somente a partir de evidências"}
  ],
  MEDICO:[
-  {key:"identity",title:"Validar identidade profissional e empresarial"},...COMMON_COMPANY,
+  {key:"identity",title:"Validar identidade profissional e empresarial"},...COMMON_COMPANY,...COMMON_FAMILY,
  {key:"cvm",title:"Verificar eventual cadastro em companhias abertas",source:"cvm"},
   {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
@@ -56,7 +59,7 @@ const STRATEGIES:Record<Strategy,StepDef[]>={
   {key:"signals",title:"Derivar sinais consultivos somente a partir de evidências"}
  ],
  GENERICO:[
-  {key:"identity",title:"Validar identidade"},...COMMON_COMPANY,
+  {key:"identity",title:"Validar identidade"},...COMMON_COMPANY,...COMMON_FAMILY,
  {key:"cvm",title:"Verificar cadastro em companhias abertas",source:"cvm"},
   {key:"financial_statements",title:"Ler valores documentados no DFP anual consolidado",source:"cvm_dfp"},
   {key:"cvm_ipe",title:"Buscar documentos e eventos corporativos no IPE/CVM",source:"cvm_ipe"},
@@ -225,6 +228,18 @@ Deno.serve(async(req:Request)=>{
       : "CNPJ ainda não disponível; a etapa não foi simulada."
   );
 
+  if(defs.some(s=>s.key==='surname_candidates')){
+   if(lead.kind!=='PERSON')await setStep('surname_candidates','SKIPPED','Busca por sobrenome é destinada a núcleos de pessoas; nenhum parentesco é inferido para uma empresa.');
+   else{
+    await setStep('surname_candidates','RUNNING','Consultando empresas do município e atividade; cruzando sobrenome em razão social e QSA público.');
+    const {resp,data}=await callFn(url,auth,'family-cluster-discovery',{lead_id:leadId,research_run_id:run.id});
+    if(resp.ok){
+     const state=data?.status==='BLOCKED'?'BLOCKED':data?.status==='FAILED'?'FAILED':data?.complete===true?'COMPLETED':'PARTIAL';
+     await setStep('surname_candidates',state,data?.note||((data?.candidates_found||0)+' pista(s) por sobrenome e contexto empresarial. '+(data?.complete?'Recorte consultado encerrado; ausência de pistas não prova ausência de grupo familiar.':'Consulta parcial; continue a busca para ampliar o recorte.')),undefined,{candidates_found:data?.candidates_found||0,complete:data?.complete===true,search_lineage:data?.search_lineage||null,pivot_id:data?.pivot?.id||null});
+    }else await setStep('surname_candidates','FAILED',undefined,data?.error||('HTTP '+resp.status));
+   }
+  }
+
   if(defs.some(s=>s.key==="municipal_gazettes")){
    await setStep("municipal_gazettes","RUNNING");
    const {resp,data}=await callFn(url,auth,"querido-diario-search",{lead_id:leadId,max_results:10,research_run_id:run.id});
@@ -236,14 +251,6 @@ Deno.serve(async(req:Request)=>{
    }else await setStep("municipal_gazettes","FAILED",undefined,data?.error||data?.note||("HTTP "+resp.status));
   }
 
-  if(strategy==="AGRO"){
-   const surname=String(lead.name||"").trim().split(/\s+/).filter(Boolean).slice(-1)[0]||null;
-   if(surname){
-    const {data:existing}=await admin.from("candidate_entities").select("id").eq("organization_id",orgId).eq("lead_id",leadId).eq("candidate_type","FAMILY_SEARCH_PIVOT").maybeSingle();
-    if(!existing)await admin.from("candidate_entities").insert({organization_id:orgId,lead_id:leadId,research_run_id:run.id,entity_type:"GROUP",label:"Candidatos com sobrenome "+surname+" em "+(lead.city||"localidade a validar"),candidate_reason:"Sobrenome e localidade são apenas pivô de descoberta. Não confirmam parentesco.",candidate_type:"FAMILY_SEARCH_PIVOT",confidence:"LOW",validation_status:"UNVALIDATED",metadata:{surname,city:lead.city,state:lead.state,segment:lead.segment},created_by:user.id});
-    await setStep("surname_candidates","PARTIAL","Pivô familiar criado. Nenhuma pessoa foi classificada como familiar sem validação independente.",undefined,{surname,city:lead.city,state:lead.state});
-   }else await setStep("surname_candidates","BLOCKED","Não foi possível extrair sobrenome útil do lead.");
-  }
 
   if(companyId){
    routes.splice(0,routes.length,...buildSourceRoutes(sources||[],{kind:lead.kind,companyResolved:true,braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')}));
@@ -358,7 +365,7 @@ Deno.serve(async(req:Request)=>{
    else await setStep("web_context",data?.status==="PARTIAL"?"PARTIAL":"COMPLETED","Contexto web consultado. Resultados são pistas para revisão, sem confirmação automática de fatos ou identidade.",undefined,{results_found:data?.results_found||0,status:data?.status});
    }
   }
-  if(defs.some(s=>s.key==='family_validation'))await setStep('family_validation','BLOCKED','Validação familiar exige fontes independentes e revisão explícita. Sobrenome e localidade não confirmam parentesco.');
+  if(defs.some(s=>s.key==='family_validation'))await setStep('family_validation',lead.kind==='PERSON'?'BLOCKED':'SKIPPED',lead.kind==='PERSON'?'Pistas por sobrenome, município e atividade foram separadas da identidade do lead. Parentesco ainda exige documentos independentes e revisão explícita.':'Etapa familiar não aplicável ao núcleo empresarial.');
 
   const automated=new Set(["base_empresarial_rfb","brasilapi_cnpj","central_balancos_sped","pncp","portal_transparencia","cvm","cvm_ipe","cvm_dfp","querido_diario","bndes_financing","web_search"]);
   for(const def of defs){

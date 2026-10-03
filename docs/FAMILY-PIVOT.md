@@ -1,0 +1,42 @@
+# Descoberta contextual por sobrenome
+
+O endpoint `family-cluster-discovery` transforma o pivô de sobrenome em uma busca cadastral real, mantendo todas as correspondências como pistas. Não confirma parentesco, identidade individual ou residência. Não cria pessoas, leads, claims, relacionamentos nem associa o CNPJ encontrado ao lead original.
+
+## Fonte e caminho consultado
+
+Fonte cadastrada `base_empresarial_rfb`, Base Empresarial, agregador de dados públicos do CNPJ/RFB. Contrato verificado no OpenAPI do fornecedor (`work/family-base-openapi.json`, cópia de investigação fora dos arquivos publicados) e nas rotas públicas de [Base Empresarial](https://baseempresarial.com.br/). A disponibilidade do agregador e a atualização de sua base limitam a descoberta; um registro empresarial recente pode ainda não estar disponível.
+
+`/partners?filter[partner_name]` exige nome exato; portanto não é usado como busca por sobrenome. A descoberta faz o caminho inverso:
+
+1. Resolve UF por `/locations/states?filter[abbreviation]`, depois município por `/locations/cities?filter[state_code]&filter[name]`. Se a grafia exata não resolver, usa `/locations/states/{ibge}/cities/stats?q=...`; exige uma única correspondência de município normalizado e código IBGE da UF.
+2. Consulta `/companies/search?city_id={ibge}&per_page=100&sort=id&page=N`. A consulta inclui estabelecimentos matriz e filial; o CNAE é validado no cliente, sem inventar filtros que a fonte não suporta.
+3. Cria pista `COMPANY` quando a razão social contém o token completo do sobrenome. Isso inclui produtores/empresas sem QSA disponível.
+4. Para estabelecimentos da atividade consultada, lê `/companies/{basic_cnpj}` e seu QSA. Exige parceiro pessoa física (`partner_identifier.code` numérico ou textual `2`, `is_legal_entity:false`), nome não ocultado e token de sobrenome completo. Um QSA por raiz é propagado aos estabelecimentos pertinentes dessa mesma rodada. Exclui o nome completo igual ao lead original.
+
+Agro abrange apenas CNAE principal 01, 02 e 03; saúde abrange 86. Agropecuária, rural, fazenda e cultivo são entradas explícitas para esse recorte. CNAE explícito de sete dígitos aceita formatos como `0151201`, `01.51-2-01` e `6201-5/01`. Empresário/genérico sem CNAE utilizável fica `BLOCKED`. A estratégia escolhida não troca o segmento registrado. Comércio de alimentos, serviços para agronegócio e atividades secundárias não são inferidos como parte do recorte.
+
+## Contrato e continuação
+
+POST autenticado: `{lead_id, research_run_id?, strategy?, restart?}`. Requer pessoa com nome, sobrenome útil, município, UF e segmento/CNAE utilizável; organização ativa e papel OWNER, ADMIN, ANALYST ou MEMBER. O run opcional deve pertencer ao mesmo lead e organização. VIEWER, run/lead externos ou sessão inválida não consultam a fonte nem escrevem resultados.
+
+Resposta: `{ok,status,complete,candidates_found,candidates,search_lineage,pivot}`. Status externo `COMPLETED|PARTIAL|BLOCKED|FAILED`; o pivô usa `metadata.search_status=COMPLETE|PARTIAL|BLOCKED|FAILED`. `FAILED` de fonte retorna HTTP 502; falha de gravação retorna HTTP 500 e `ok:false`. A ausência de `meta.has_more` ou falha/timeout não equivale a resultado vazio conclusivo.
+
+O único pivô `FAMILY_SEARCH_PIVOT` por lead guarda fingerprint do nome/localidade/regra de atividade, contagem cumulativa `scanned_count`, checkpoint dos últimos 500 CNPJs, próxima página, backlog sanitizado, limites e `continuation`. Mudança de contexto reinicia a cobertura; os candidatos históricos e as revisões permanecem. `candidates_found` conta apenas pistas não rejeitadas do fingerprint atual. Bloqueio da fonte registra `BLOCKED` no pivô e preserva o cursor sanitizado.
+
+Quando uma pesquisa terminal estiver parcial, falhar ou já estiver completa, “Consultar novamente” pode enviar `restart:true`. Isso reinicia apenas o cursor e as lacunas de cobertura para uma nova consulta real da fonte. Não apaga evidências/candidatos, não muda seus IDs nem reabre rejeições. Pivô rejeitado continua bloqueado antes desse reinício. Continuação normal omite `restart`.
+
+Cada rodada consulta até três páginas de 100 estabelecimentos, dezesseis raízes QSA, duas consultas QSA simultâneas e tem orçamento de 45 segundos para consultas de fonte. Drena o backlog antes de novas páginas. O orçamento não inclui a gravação posterior, limitada a 60 candidatos por rodada. Exceder 60 pistas é uma lacuna explícita `candidate_limit_reached`; permanece `PARTIAL`, sem promessa de recuperar automaticamente todas as pistas excedentes. A interface deve mostrar o limite/revisão necessária. QSA acima de 100 parceiros, truncado, linha malformada ou campos de contexto ausentes mantém lacuna persistente; reconsulta sem nova cobertura não transforma essa lacuna em completa. Falha de QSA após duas rodadas registra raiz pendente para revisão; HTTP 429 preserva o backlog e não consome essas tentativas. `Retry-After` longo é guardado em `retry_not_before` e impede reconsulta antecipada.
+
+`complete:true` descreve apenas o recorte cadastral consumido nesta fonte e nesta consulta. Mesmo uma busca completa com zero pistas não demonstra inexistência de grupo familiar. O fornecedor limita paginação profunda; erros nessa região ficam parciais, e uma expansão futura deve adotar o cursor documentado pelo fornecedor.
+
+## Evidência e revisão
+
+Pistas usam `candidate_type:FAMILY_CONTEXT_MATCH`, `confidence:LOW`, `validation_status:UNVALIDATED` e `kinship_confirmed:false`. A evidência é AGGREGATOR/CNPJ_REGISTRY: `VERIFIED` descreve apenas a observação cadastral da fonte. O texto explicita que cidade/UF pertencem ao estabelecimento, nunca à residência da pessoa. Não copia CPF, idade, endereço ou identificadores de parceiro.
+
+Evidência é gravada com `persistSourceEvidence` e exige estado verificado. Candidato tem ID determinístico por organização, lead, tipo, nome e CNPJ completo. Inserção ignora duplicados; não sobrescreve validação/confiança nem reabre rejeitados, inclusive revisão concorrente. Candidato existente de outro contexto não é renovado automaticamente. Atualização de progresso do pivô exige `UNVALIDATED`; revisão humana concorrente impede a atualização. Todas as gravações são verificadas antes de retornar sucesso.
+
+## Integração e verificação
+
+O orquestrador deve chamar a função para pessoas nas estratégias aplicáveis antes da investigação municipal, sem atribuir automaticamente identidade ou parentesco. O painel pode abrir a empresa associada à pista; a abertura deve validar a evidência própria do lead. `continuation:true` oferece nova rodada; `PARTIAL` com `continuation:false` mostra lacuna/revisão necessária. Fonte indisponível deve mostrar `BLOCKED` mesmo quando havia uma consulta anterior completa.
+
+`node --test tests/family-discovery.test.mjs` executa fixtures sem dados pessoais reais: rotas/cidade/CNAE, matriz e filial, exclusões de QSA, privacidade, paginação, checkpoint cumulativo, concorrência/limites, retomada, 429, formato incompleto persistente, autorização, revisão concorrente, isolamento de contexto e erro de escrita. QA público e implantação em teste ficam a cargo da integração; estes quatro arquivos não aplicam migrações nem publicam alterações.
