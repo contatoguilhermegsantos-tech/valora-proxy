@@ -23,6 +23,16 @@ let passes=0;
 function render(d=dossier,key='C:company1'){stateIndex=0;selected=key;return renderToStaticMarkup(React.createElement(FamilyNetworkGraph,{dossier:d,onUpdated:async()=>{}}))}
 const opening=html=>html.match(/<button[^>]*>Investigar separadamente<\/button>/)?.[0]||'';
 test('Same full name retains two occurrence keys',()=>{const clean=q.cleanGraph(graph,dossier.candidates,'Lead atual');assert.equal(clean.nodes.filter(n=>n.label==='Mesma Pessoa').length,2);assert.notEqual(clean.nodes[2].key,clean.nodes[3].key)});
+test('Same-name QSA buttons identify their distinct company CNPJs visually and accessibly',()=>{
+ const html=render(dossier,'P:occurrence1');
+ const buttons=[...html.matchAll(/<button[^>]*aria-label="Nome citado no QSA:[^"]*"[^>]*>[\s\S]*?<\/button>/g)].map(match=>match[0]);
+ assert.equal(buttons.length,2);
+ for(const full of ['11111111000191','22222222000191']){
+  const button=buttons.find(value=>value.includes(`aria-label="Nome citado no QSA: Mesma Pessoa. QSA do CNPJ ${full}. Selecionar caminho e documentos."`));
+  assert.ok(button);assert.match(button,new RegExp(`>QSA do CNPJ ${full}<`));assert.match(button,/Identidade individual não confirmada/);
+ }
+ assert.notEqual(buttons[0].match(/aria-label="([^"]*)"/)[1],buttons[1].match(/aria-label="([^"]*)"/)[1]);
+});
 test('Weighted path is deterministic despite shuffled edges',()=>{const a=q.connectionPath(graph.nodes,graph.edges,'C:company2'),b=q.connectionPath(graph.nodes,[...graph.edges].reverse(),'C:company2');assert.equal(JSON.stringify(a),JSON.stringify(b));assert.equal(a.nodes.join(','),'root,C:company1,P:occurrence1,P:occurrence2,C:company2')});
 test('Documented Julio route outranks a shorter surname shortcut without changing confidence',()=>{
  const nodes=[{key:'root',type:'ROOT'}, {key:'agro',type:'COMPANY'}, {key:'julio',type:'PERSON_CITATION'}, {key:'market',type:'COMPANY'}, {key:'jacira',type:'PERSON_CITATION'}];
