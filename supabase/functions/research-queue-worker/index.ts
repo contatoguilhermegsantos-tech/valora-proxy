@@ -21,7 +21,7 @@ Deno.serve(async(req:Request)=>{
   if(!orgId) return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
   const {data:member}=await admin.from("organization_members").select("status,role").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
   if(member?.status!=="ACTIVE") return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
-  if(member.role==='VIEWER')return new Response(JSON.stringify({error:'Viewer is read-only'}),{status:403,headers:H});
+  if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(member.role))return new Response(JSON.stringify({error:'Operator access required'}),{status:403,headers:H});
 
   const now=new Date().toISOString();
   const {data:item,error:pickErr}=await admin.from("research_job_queue").select("*")
@@ -35,7 +35,7 @@ Deno.serve(async(req:Request)=>{
   const {data:claimed,error:claimErr}=await admin.from("research_job_queue").update({
     status:"RUNNING",attempts:Number(item.attempts||0)+1,started_at:now,finished_at:null,last_error:null,
     progress:{stage:"RUNNING",message:"Investigação em processamento.",started_at:now},updated_at:now
-  }).eq("id",item.id).in("status",["PENDING","RETRY"]).select("*").maybeSingle();
+  }).eq("id",item.id).eq('organization_id',orgId).eq('requested_by',user.id).in("status",["PENDING","RETRY"]).select("*").maybeSingle();
   if(claimErr) return new Response(JSON.stringify({error:claimErr.message}),{status:500,headers:H});
   if(!claimed) return new Response(JSON.stringify({ok:true,status:"RACE_LOST"}),{headers:H});
 
@@ -48,6 +48,7 @@ Deno.serve(async(req:Request)=>{
       ? {lead_id:claimed.lead_id,company_id:claimed.company_id}
       : {
           lead_id:claimed.lead_id,
+          research_job_id:claimed.id,
           strategy:claimed.strategy,
           cnpj:claimed.payload?.cnpj||undefined,
           objective:claimed.payload?.objective||"Investigação profunda assíncrona baseada em evidências"
@@ -70,22 +71,30 @@ Deno.serve(async(req:Request)=>{
     if(!data.history_capture?.ok){
       try{const history=await fetch(url+'/functions/v1/capture-intelligence',{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({lead_id:claimed.lead_id,research_run_id:data.research_run_id}),signal:AbortSignal.timeout(25000)});data.history_capture=await history.json();}catch{data.history_capture={ok:false,error:'History capture pending; retry from dossier'};}
     }
-    await admin.from("research_job_queue").update({
+    const saved=await admin.from("research_job_queue").update({
       status:"COMPLETED",finished_at:finished,updated_at:finished,
       progress:{stage:"COMPLETED",message:claimed.job_type==="COMPANY_RESEARCH"?"Pesquisa profunda da empresa concluída.":"Investigação concluída.",research_run_id:data.research_run_id,research_status:data.status||null,company_id:claimed.company_id||null},
       result:data,last_error:null
-    }).eq("id",claimed.id);
+    }).eq("id",claimed.id).eq('organization_id',orgId).eq('requested_by',user.id).eq('status','RUNNING').select('id').maybeSingle();
+    if(saved.error||!saved.data)return new Response(JSON.stringify({error:'Could not finalize completed research job',job_id:claimed.id}),{status:500,headers:H});
   }else{
+    // start-research binds its run before calling sources. A lost HTTP response must retain that exact run.
+    if(!data?.research_run_id){
+      const current=await admin.from('research_job_queue').select('progress').eq('id',claimed.id).eq('organization_id',orgId).eq('requested_by',user.id).eq('status','RUNNING').maybeSingle();
+      if(current.error)return new Response(JSON.stringify({error:'Could not preserve research job progress',job_id:claimed.id}),{status:500,headers:H});
+      if(current.data?.progress?.research_run_id)data={...(data||{}),research_run_id:current.data.progress.research_run_id};
+    }
     const attempt=Number(claimed.attempts||1),maxAttempts=Number(claimed.max_attempts||3);
     const willRetry=attempt<maxAttempts;
     const next=new Date(Date.now()+Math.min(15,Math.pow(2,attempt))*60_000).toISOString();
     const err=String(data?.error||data?.detail||("HTTP "+(resp?.status||0))).slice(0,2000);
     finalStatus=willRetry?"RETRY":"FAILED";
-    await admin.from("research_job_queue").update({
+    const saved=await admin.from("research_job_queue").update({
       status:finalStatus,next_attempt_at:willRetry?next:claimed.next_attempt_at,
       finished_at:willRetry?null:finished,updated_at:finished,last_error:err,
-      progress:{stage:finalStatus,message:willRetry?"Falhou; nova tentativa agendada.":"Pesquisa falhou após o limite de tentativas.",next_attempt_at:willRetry?next:null}
-    }).eq("id",claimed.id);
+      progress:{stage:finalStatus,message:willRetry?"Falhou; nova tentativa agendada.":"Pesquisa falhou após o limite de tentativas.",research_run_id:data?.research_run_id||null,next_attempt_at:willRetry?next:null}
+    }).eq("id",claimed.id).eq('organization_id',orgId).eq('requested_by',user.id).eq('status','RUNNING').select('id').maybeSingle();
+    if(saved.error||!saved.data)return new Response(JSON.stringify({error:'Could not save research retry state',job_id:claimed.id}),{status:500,headers:H});
   }
 
   const {count:remaining}=await admin.from("research_job_queue").select("*",{count:"exact",head:true})

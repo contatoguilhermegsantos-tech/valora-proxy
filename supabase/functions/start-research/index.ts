@@ -100,9 +100,16 @@ Deno.serve(async(req:Request)=>{
  if(!orgId)return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
  const {data:membership}=await admin.from("organization_members").select("role,status").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
  if(membership?.status!=="ACTIVE")return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
-  if(membership.role==="VIEWER")return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
+  if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(membership.role))return new Response(JSON.stringify({error:"Operator access required"}),{status:403,headers:H});
  const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
  if(!lead)return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
+ const jobId=b.research_job_id?String(b.research_job_id):null;
+ if(jobId){
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId))return new Response(JSON.stringify({error:'Valid research job required'}),{status:400,headers:H});
+  const job=await admin.from('research_job_queue').select('id,status,job_type').eq('id',jobId).eq('organization_id',orgId).eq('lead_id',leadId).eq('requested_by',user.id).maybeSingle();
+  if(job.error)return new Response(JSON.stringify({error:'Could not validate research job'}),{status:500,headers:H});
+  if(!job.data||job.data.status!=='RUNNING'||job.data.job_type!=='LEAD_RESEARCH')return new Response(JSON.stringify({error:'Running research job does not match this lead'}),{status:409,headers:H});
+ }
  const {data:contextLinks,error:contextError}=lead.kind==='COMPANY'?await admin.from('lead_company_links').select('status,companies(cnpj)').eq('organization_id',orgId).eq('lead_id',lead.id):{data:[],error:null};
  if(contextError)return new Response(JSON.stringify({error:contextError.message}),{status:500,headers:H});
  let resolvedCnpj='';try{resolvedCnpj=resolveCompanyCnpj(lead,b.cnpj,contextLinks||[])}catch(e){return new Response(JSON.stringify({error:String((e as Error).message)}),{status:409,headers:H})}
@@ -126,6 +133,13 @@ Deno.serve(async(req:Request)=>{
  }));
  if(insertStepsError){await admin.from('research_runs').update({status:'FAILED',finished_at:new Date().toISOString(),counters:{fatal_error:'Could not persist research plan'}}).eq('id',run.id);return new Response(JSON.stringify({error:'Could not persist research plan',research_run_id:run.id}),{status:500,headers:H})}
 
+ const jobProgress=async(stage:string,message:string,status='RUNNING')=>{
+  if(!jobId)return;
+  const saved=await admin.from('research_job_queue').update({progress:{stage,message,research_run_id:run.id,research_status:status},updated_at:new Date().toISOString()}).eq('id',jobId).eq('organization_id',orgId).eq('lead_id',leadId).eq('requested_by',user.id).eq('status','RUNNING').select('id').maybeSingle();
+  if(saved.error||!saved.data)throw Error('Could not bind research progress to its running job');
+ };
+ try{await jobProgress('PLAN_READY','Plano criado; iniciando a pesquisa.')}catch{await admin.from('research_runs').update({status:'FAILED',finished_at:new Date().toISOString(),counters:{fatal_error:'Could not bind running research job'}}).eq('id',run.id).eq('organization_id',orgId);return new Response(JSON.stringify({error:'Could not bind running research job',research_run_id:run.id}),{status:500,headers:H})}
+
  const setStep=async(key:string,status:string,summary?:string,error?:string,extra:any={})=>{
   const route=routes.find(r=>r.steps.includes(key));
   const patch:any={status,result_summary:summary||null,error_summary:error||null,metadata:{...(route?{source_route:route}:{}),...extra}};
@@ -136,6 +150,7 @@ Deno.serve(async(req:Request)=>{
   if(["COMPLETED","PARTIAL","BLOCKED","FAILED","SKIPPED"].includes(status))patch.finished_at=new Date().toISOString();
   const {error:stepError}=await admin.from("research_steps").update(patch).eq("research_run_id",run.id).eq("step_key",key);
   if(stepError)throw new Error('Could not persist research progress: '+key);
+  await jobProgress(key,summary||defs.find(s=>s.key===key)?.title||'Pesquisa em andamento.');
  };
 
  try{
@@ -145,7 +160,13 @@ Deno.serve(async(req:Request)=>{
   let identityStatus=String(lead.identity_status||"PENDING");
   let supportedClusterCompanies:any[]=[];
 
-  if(lead.kind==="COMPANY"){await setStep("name_discovery","SKIPPED","Núcleo empresarial: investigação pelo CNPJ, sem busca de sócios pelo nome da empresa.");}
+  if(lead.kind==='COMPANY'&&cnpjShape(cnpj)){await setStep('name_discovery','SKIPPED','CNPJ do núcleo já informado; pesquisa cadastral pelo identificador exato.');}
+  if(lead.kind==='COMPANY'&&!cnpjShape(cnpj)){
+   await setStep('name_discovery','RUNNING','Buscando razão social e nome fantasia; o CNPJ exigirá confirmação.');
+   const discovery=await callFn(url,auth,'company-name-discovery',{lead_id:leadId,research_run_id:run.id});
+   if(discovery.resp.ok){nameCandidates=(Array.isArray(discovery.data?.candidates)?discovery.data.candidates:[]).filter((x:any)=>x.validation_status!=='REJECTED');await setStep('name_discovery',discovery.data?.status==='BLOCKED'?'BLOCKED':discovery.data?.complete===true?'COMPLETED':'PARTIAL',nameCandidates.length?`${nameCandidates.length} candidato(s) de razão social/nome fantasia. Confirme o CNPJ do estabelecimento correto para liberar a pesquisa documental.`:'Nenhum candidato ativo no recorte consultado; a resposta não comprova inexistência da empresa.',undefined,{candidates_found:nameCandidates.length,candidate_type:'RFB_COMPANY_NAME_MATCH',confirmation_required:true,complete:discovery.data?.complete===true,search_lineage:discovery.data?.search_lineage||null})}
+   else await setStep('name_discovery','FAILED',undefined,discovery.data?.error||('HTTP '+discovery.resp.status),{candidate_type:'RFB_COMPANY_NAME_MATCH',confirmation_required:true,complete:false});
+  }
   if(lead.kind!=="COMPANY"&&defs.some(s=>s.key==="name_discovery")){
     await setStep("name_discovery","RUNNING");
     const {resp,data}=await callFn(url,auth,"name-company-discovery",{lead_id:leadId,research_run_id:run.id});
@@ -416,7 +437,8 @@ Deno.serve(async(req:Request)=>{
   const statuses=(steps||[]).map((x:any)=>x.status);
   const counts={completed:statuses.filter((s:string)=>s==="COMPLETED").length,partial:statuses.filter((s:string)=>s==="PARTIAL").length,blocked:statuses.filter((s:string)=>s==="BLOCKED").length,failed:statuses.filter((s:string)=>s==="FAILED").length};
   const finalStatus=counts.failed>0||counts.blocked>0||counts.partial>0||statuses.some((s:string)=>['PENDING','RUNNING'].includes(s))?"PARTIAL":"COMPLETED";
-  await admin.from("research_runs").update({status:finalStatus,finished_at:new Date().toISOString(),counters:counts}).eq("id",run.id);
+  const finishedRun=await admin.from("research_runs").update({status:finalStatus,finished_at:new Date().toISOString(),counters:counts}).eq("id",run.id).eq('organization_id',orgId);
+  if(finishedRun.error)throw Error('Could not finalize research run');
   let historyCapture:any;
   try{const response=await fetch(url+'/functions/v1/capture-intelligence',{method:'POST',headers:{Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({lead_id:leadId,research_run_id:run.id}),signal:AbortSignal.timeout(25000)});historyCapture=await response.json();}catch{historyCapture={ok:false,error:'History capture pending; retry from dossier'};}
   return new Response(JSON.stringify({ok:true,research_run_id:run.id,status:finalStatus,counters:counts,history_capture:historyCapture,company_id:companyId,cnpj_result:cnpjResult,name_candidates:nameCandidates,supported_cluster_companies:supportedClusterCompanies}),{headers:H});

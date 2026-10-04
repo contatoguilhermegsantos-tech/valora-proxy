@@ -5,6 +5,7 @@ export function normalizeResearchStep<T extends {source_key?:string;result_summa
  return {...step,action_url:'https://api.queridodiario.org.br/docs',result_summary:String(step.result_summary||'').includes('Município não está coberto/localizado')?'Resultado legado inconclusivo. Reexecute a investigação para confirmar a cobertura municipal.':step.result_summary};
 }
 export const SOURCE_ROUTES:Route[] = [
+ {key:'company_name_discovery',question:'Qual CNPJ corresponde à razão social ou nome fantasia desta empresa?',steps:['name_discovery'],providers:[{key:'base_empresarial_rfb',fn:'company-name-discovery'}],requiresCompany:false,limit:'Busca cadastral por prefixo de razão social e nome fantasia. Marcas e nomes semelhantes geram candidatos; o usuário confirma o estabelecimento correto.',next:'Confirmar o CNPJ documentado antes de pesquisar fatos e documentos desta empresa.'},
  {key:'company_discovery',question:'Quais empresas podem corresponder a esta pessoa?',steps:['name_discovery'],providers:[{key:'base_empresarial_rfb',fn:'name-company-discovery'}],requiresCompany:false,limit:'Nome e localidade produzem candidatos; homônimos precisam de validação.',next:'Revisar candidatos e investigar cada empresa em seu próprio núcleo.'},
  {key:'family_context',question:'Há pessoas ou empresas com o sobrenome no município e segmento pesquisados?',steps:['surname_candidates'],providers:[{key:'base_empresarial_rfb',fn:'family-cluster-discovery'},{key:'minha_receita_rfb',fn:'family-cluster-discovery'}],requiresCompany:false,limit:'Cruza cadastros empresariais e QSA por sobrenome, município/UF e atividade. Minha Receita é alternativa experimental; ambas derivam dos dados RFB e não são confirmações independentes. Cidade da empresa não é residência pessoal; coincidências não confirmam parentesco.',next:'Continuar o recorte quando parcial e investigar cada pista separadamente, mantendo a validação de parentesco pendente.'},
  {key:'company_registry',question:'Qual é o cadastro e o quadro societário deste CNPJ?',steps:['cnpj_qsa'],providers:[{key:'brasilapi_cnpj',fn:'cnpj-enrich'},{key:'base_empresarial_rfb',fn:'cnpj-enrich'}],requiresCompany:true,limit:'O conector tenta BrasilAPI e utiliza Base Empresarial como alternativa. QSA não comprova controle final, parentesco ou poderes financeiros.',next:'Consultar cadastro e revisar vínculos documentados; validar controle e poderes por atos societários.'},
@@ -23,7 +24,7 @@ export const SOURCE_ROUTES:Route[] = [
 
 export function buildSourceRoutes(sources:Source[],context:{companyResolved:boolean;kind?:string;braveConfigured?:boolean;portalConfigured?:boolean}) {
  const byKey=new Map(sources.map(s=>[s.key,s]));
- return SOURCE_ROUTES.filter(r=>!(context.kind==='COMPANY'&&['company_discovery','family_context'].includes(r.key))).map(route=>{
+ return SOURCE_ROUTES.filter(r=>r.key==='company_name_discovery'?context.kind==='COMPANY'&&!context.companyResolved:!(context.kind==='COMPANY'&&['company_discovery','family_context'].includes(r.key))).map(route=>{
   const providers=route.providers.map(p=>{
    const source=byKey.get(p.key);
    const configured=!p.credential||(p.credential==='brave'?context.braveConfigured:context.portalConfigured)===true;

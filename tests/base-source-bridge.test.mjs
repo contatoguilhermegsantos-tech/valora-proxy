@@ -17,7 +17,7 @@ function fixture({ role='ANALYST', status='ACTIVE', user=true, profile=true, dbE
       catch(error){request.emit('error',error);request.emit('close')}
     })()};return request;
   };
-  const context={exports:{},createClient:()=>db,httpsRequest,process:{env:{}},Request,Response,AbortSignal,TextDecoder,ReadableStream,Error,setTimeout,clearTimeout};
+  const context={exports:{},createClient:()=>db,httpsRequest,process:{env:{}},Request,Response,AbortSignal,TextDecoder,ReadableStream,URLSearchParams,Error,setTimeout,clearTimeout};
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return {reads,requests,call:(body={operation:'companies_search',city_id:'3525607',page:1},token='fixture')=>context.exports.POST(new Request('https://max.test/api/source/base-empresarial',{method:'POST',headers:{...(token?{Authorization:`Bearer ${token}`} :{}),'Content-Type':'application/json'},body:JSON.stringify(body)}))};
 }
@@ -36,6 +36,22 @@ test('bridge only accepts bounded documented operations, never arbitrary URLs or
 });
 test('bridge returns original company contract with no writes or evidence assertion',async()=>{
   const payload={data:{corporate_name:'Fixture',partners:[],establishments:[]}};const f=fixture({upstream:()=>Response.json(payload)});const response=await f.call({operation:'company_detail',basic_cnpj:'07916090',timeout_ms:1000});assert.equal(response.status,200);assert.deepEqual(await response.json(),payload);assert.equal(f.requests[0].url,'https://app.baseempresarial.com.br/api/v1/companies/07916090');assert.equal(f.reads.length,2);
+});
+test('bridge supports bounded corporate and trade name searches without a city or forwarding credentials',async()=>{
+  for(const key of ['corporate_name','trade_name']){
+    const f=fixture();const response=await f.call({operation:'companies_search',[key]:'  Usina Colombo & Cia  ',page:1});assert.equal(response.status,200);
+    const url=new URL(f.requests[0].url);assert.equal(url.origin,'https://app.baseempresarial.com.br');assert.equal(url.pathname,'/api/v1/companies/search');assert.equal(url.searchParams.get(key),'Usina Colombo & Cia');assert.equal(url.searchParams.get('city_id'),null);assert.equal(url.searchParams.get('per_page'),'20');assert.equal(url.searchParams.get('page'),'1');assert.equal(f.requests[0].options.headers.Authorization,undefined);
+  }
+  const f=fixture();assert.equal((await f.call({operation:'companies_search',city_id:'3525607',corporate_name:'Empresa',per_page:10,page:2})).status,200);const url=new URL(f.requests[0].url);assert.equal(url.searchParams.get('city_id'),'3525607');assert.equal(url.searchParams.get('per_page'),'10');assert.equal(url.searchParams.get('page'),'2');
+});
+test('bridge rejects unbounded searches, invalid name filters and page sizes before contacting the source',async()=>{
+  for(const body of [
+    {operation:'companies_search',page:1},{operation:'companies_search',corporate_name:' ',page:1},{operation:'companies_search',trade_name:'ab',page:1},
+    {operation:'companies_search',corporate_name:'a'.repeat(181),page:1},{operation:'companies_search',corporate_name:'Company\nOther',page:1},
+    {operation:'companies_search',trade_name:123,page:1},{operation:'companies_search',corporate_name:'Company',city_id:'../city',page:1},
+    ...[0,101,1.5,'20'].map(per_page=>({operation:'companies_search',corporate_name:'Company',per_page,page:1})),
+    {operation:'companies_search',corporate_name:'Company',page:1,partner_name:'Person'},
+  ]){const f=fixture();assert.equal((await f.call(body)).status,400);assert.equal(f.requests.length,0)}
 });
 test('bridge supports registry alphanumeric roots without accepting paths or lowercase input',async()=>{
   const f=fixture({upstream:()=>Response.json({data:{corporate_name:'Fixture'}})});assert.equal((await f.call({operation:'company_detail',basic_cnpj:'AB12CD34'})).status,200);assert.equal(f.requests[0].url,'https://app.baseempresarial.com.br/api/v1/companies/AB12CD34');

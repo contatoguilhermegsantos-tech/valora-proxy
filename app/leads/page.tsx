@@ -7,6 +7,7 @@ import { Shell } from '@/components/Shell'
 import { StatusBadge } from '@/components/StatusBadge'
 import { supabaseBrowser } from '@/lib/supabase'
 import { normalizeCnpj,isValidCnpj } from '@/lib/cnpj'
+import {inferResearchStrategy,pickEnqueuedResearch,researchHref} from '@/lib/research-progress'
 
 type Lead={id:string;name:string;kind:string;city:string|null;state:string|null;segment:string|null;initial_cnpj:string|null;identity_status:string;created_at:string;origin_reason:string|null}
 const aliases:any={
@@ -22,26 +23,32 @@ function fieldFor(header:string){const h=norm(header);for(const [field,list] of 
 export default function Leads(){
  const router=useRouter();
  const [rows,setRows]=useState<Lead[]>([]);const [form,setForm]=useState({name:'',kind:'PERSON',city:'',state:'SP',segment:'',initial_cnpj:''});const [busy,setBusy]=useState(false);const [msg,setMsg]=useState('');const fileRef=useRef<HTMLInputElement>(null)
+ const creating=useRef(false)
  async function load(){const {data}=await supabaseBrowser().from('leads').select('*').order('created_at',{ascending:false});setRows((data??[]) as Lead[])}useEffect(()=>{load()},[])
  async function add(e:React.FormEvent){
-  e.preventDefault();if(!form.name.trim())return;setBusy(true);setMsg('');
+  e.preventDefault();if(creating.current)return;if(!form.name.trim()){setMsg('Informe o nome da pessoa ou empresa para iniciar a pesquisa.');return}setBusy(true);setMsg('');
   const cnpj=normalizeCnpj(form.initial_cnpj);
   if(cnpj&&!isValidCnpj(cnpj)){setMsg('CNPJ inválido. O MAX aceita o formato numérico legado e o CNPJ alfanumérico de 14 posições.');setBusy(false);return}
-  const sb=supabaseBrowser();
+  creating.current=true;
+  try{const sb=supabaseBrowser();
   const {data:created,error}=await sb.from('leads').insert({
     name:form.name.trim(),kind:form.kind,city:form.city||null,state:form.state||null,
     segment:form.segment||null,initial_cnpj:cnpj||null
   }).select('id').single();
-  if(error||!created){setMsg(error?.message||'Não foi possível criar o lead.');setBusy(false);return}
-  const seg=norm(form.segment);
-  const strategy=/agro|rural|fazenda|pecu|agric/.test(seg)?'AGRO':/medic|saude|clinic|hospital/.test(seg)?'MEDICO':form.kind==='COMPANY'?'EMPRESARIO':'GENERICO';
-  setMsg('Lead criado. A investigação foi colocada na fila e continuará em segundo plano.');
-  const queued=await sb.functions.invoke('research-queue',{body:{action:'enqueue',lead_id:created.id,strategy,cnpj:cnpj||undefined}});
-  if(queued.error)setMsg('Lead criado, mas não foi possível iniciar a fila: '+queued.error.message);
-  router.push(`/leads/${created.id}`);
+  if(error||!created)throw new Error(error?.message||'Não foi possível criar o lead.');
+  setMsg('Lead salvo. Confirmando o início da pesquisa…');
+  try{
+   const queued=await sb.functions.invoke('research-queue',{body:{action:'enqueue',lead_id:created.id,strategy:inferResearchStrategy(form),cnpj:cnpj||undefined}});
+   if(queued.error)throw queued.error;
+   const job=pickEnqueuedResearch(queued.data,created.id);
+   router.push(researchHref(created.id,job.id));
+  }catch{
+   router.push(researchHref(created.id,null,true));
+  }
+  }catch(error:any){setMsg(error?.message||'Não foi possível salvar o lead. Tente novamente.');creating.current=false;setBusy(false)}
  }
  async function importFile(file:File){setBusy(true);setMsg('');try{const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];const raw=XLSX.utils.sheet_to_json<Record<string,any>>(ws,{defval:''});if(!raw.length)throw new Error('Planilha vazia.');const headers=Object.keys(raw[0]);const mapping=new Map<string,string>();for(const h of headers){const f=fieldFor(h);if(f&&!mapping.has(f))mapping.set(f,h)}if(!mapping.has('name'))throw new Error('Não encontrei uma coluna de nome/empresa/cliente.');const inserts=raw.map(r=>{const val=(f:string)=>mapping.get(f)?r[mapping.get(f)!]:'';const name=String(val('name')||'').trim();const cnpj=normalizeCnpj(val('initial_cnpj'));const rawKind=norm(val('kind'));return name?{name,kind:/pj|company|empresa/.test(rawKind)?'COMPANY':'PERSON',city:String(val('city')||'').trim()||null,state:String(val('state')||'').trim().toUpperCase().slice(0,2)||null,segment:String(val('segment')||'').trim()||null,initial_cnpj:isValidCnpj(cnpj)?cnpj:null,reference_company:String(val('reference_company')||'').trim()||null,commercial_note:String(val('commercial_note')||'').trim()||null}:null}).filter(Boolean);if(!inserts.length)throw new Error('Nenhuma linha válida encontrada.');let ok=0;for(let i=0;i<inserts.length;i+=500){const {error}=await supabaseBrowser().from('leads').insert(inserts.slice(i,i+500) as any);if(error)throw error;ok+=Math.min(500,inserts.length-i)}setMsg(`${ok} lead(s) importado(s). O reconhecimento foi automático; nenhum campo desconhecido virou fato.`);await load()}catch(e:any){setMsg(e.message||'Falha na importação.')}finally{setBusy(false);if(fileRef.current)fileRef.current.value=''}}
  function exportFile(){const out=rows.map(r=>({Nome:r.name,Tipo:r.kind,Cidade:r.city||'',UF:r.state||'',Segmento:r.segment||'',CNPJ:r.initial_cnpj||'',Identidade:r.identity_status,'Criado em':new Date(r.created_at).toLocaleString('pt-BR')}));const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(out),'Leads');XLSX.writeFile(wb,'MAX_Leads.xlsx')}
  return <Shell><div className="top"><div><div className="h1">Leads</div><div className="sub">Cada lead pode se transformar em um grafo de empresas, sócios, eventos e novos núcleos de prospecção.</div></div><div className="actions"><input ref={fileRef} style={{display:'none'}} type="file" accept=".xlsx,.xls,.csv" onChange={e=>e.target.files?.[0]&&importFile(e.target.files[0])}/><button className="btn secondary" disabled={busy} onClick={()=>fileRef.current?.click()}>Importar Excel</button><button className="btn secondary" onClick={exportFile} disabled={!rows.length}>Exportar Excel</button></div></div>{msg&&<div className="banner section">{msg}</div>}<div className="two section"><div className="card"><div className="table-wrap"><table className="table"><thead><tr><th>Lead</th><th>Tipo</th><th>Local</th><th>Segmento</th><th>CNPJ inicial</th><th>Identidade</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}><td><Link className="lead-link" href={`/leads/${r.id}`}>{r.name}</Link>{r.origin_reason&&<div className="micro">Originado do grafo</div>}</td><td>{r.kind}</td><td>{[r.city,r.state].filter(Boolean).join('/')||'—'}</td><td>{r.segment||'—'}</td><td>{r.initial_cnpj||'—'}</td><td><StatusBadge value={r.identity_status}/></td></tr>)}</tbody></table></div>{!rows.length&&<div className="empty">Crie ou importe o primeiro lead.</div>}</div>
- <div className="card"><h3>Novo lead</h3><form className="form" onSubmit={add}><label className="label">Nome<input className="input" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Pessoa ou empresa"/></label><div className="form-row"><label className="label">Tipo<select className="select" value={form.kind} onChange={e=>setForm({...form,kind:e.target.value})}><option>PERSON</option><option>COMPANY</option></select></label><label className="label">UF<input className="input" value={form.state} maxLength={2} onChange={e=>setForm({...form,state:e.target.value.toUpperCase()})}/></label></div><label className="label">Cidade<input className="input" value={form.city} onChange={e=>setForm({...form,city:e.target.value})}/></label><label className="label">Segmento<input className="input" value={form.segment} onChange={e=>setForm({...form,segment:e.target.value})} placeholder="Agro, saúde, indústria…"/></label><label className="label">CNPJ inicial (opcional)<input className="input" value={form.initial_cnpj} onChange={e=>setForm({...form,initial_cnpj:e.target.value})} placeholder="14 posições (números ou letras)"/></label><button className="btn" disabled={busy}>{busy?'Pesquisando…':'Criar e investigar'}</button></form><p className="muted">Você pode começar só pelo nome. Ao criar o lead, o MAX já inicia a descoberta societária; se encontrar empresas candidatas, pede confirmação antes de atribuir o CNPJ.</p></div></div></Shell>
+ <div className="card"><h3>Nova pesquisa</h3><form className="form" onSubmit={add}><label className="label">Nome<input className="input" required maxLength={200} disabled={busy} value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Pessoa ou empresa"/></label><div className="form-row"><label className="label">Tipo<select className="select" value={form.kind} onChange={e=>setForm({...form,kind:e.target.value})}><option>PERSON</option><option>COMPANY</option></select></label><label className="label">UF<input className="input" value={form.state} maxLength={2} onChange={e=>setForm({...form,state:e.target.value.toUpperCase()})}/></label></div><label className="label">Cidade<input className="input" value={form.city} onChange={e=>setForm({...form,city:e.target.value})}/></label><label className="label">Segmento<input className="input" value={form.segment} onChange={e=>setForm({...form,segment:e.target.value})} placeholder="Agro, saúde, indústria…"/></label><label className="label">CNPJ inicial (opcional)<input className="input" value={form.initial_cnpj} onChange={e=>setForm({...form,initial_cnpj:e.target.value})} placeholder="14 posições (números ou letras)"/></label><button className="btn" disabled={busy}>{busy?'Iniciando pesquisa…':'Criar e investigar'}</button></form><p className="muted">Você pode começar só pelo nome. Ao criar o lead, o MAX já inicia a descoberta societária; se encontrar empresas candidatas, pede confirmação antes de atribuir o CNPJ.</p></div></div></Shell>
 }

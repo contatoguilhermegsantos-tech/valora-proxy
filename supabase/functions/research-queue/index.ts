@@ -41,8 +41,10 @@ Deno.serve(async(req:Request)=>{
   if(member?.status!=="ACTIVE") return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
 
   if(action==="list"){
+    if(b.job_id&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(b.job_id)))return new Response(JSON.stringify({error:'Valid job_id required'}),{status:400,headers:H});
     let q=admin.from("research_job_queue").select("*,companies(legal_name,trade_name,cnpj)").eq("organization_id",orgId).order("created_at",{ascending:false}).limit(Math.max(1,Math.min(Number(b.limit||100),200)));
     if(b.lead_id) q=q.eq("lead_id",String(b.lead_id));
+    if(b.job_id) q=q.eq('id',String(b.job_id));
     const {data,error}=await q;
     if(error) return new Response(JSON.stringify({error:error.message}),{status:500,headers:H});
     if((data||[]).some((x:any)=>["PENDING","RETRY"].includes(x.status))) dispatchWorker(url,auth);
@@ -50,7 +52,7 @@ Deno.serve(async(req:Request)=>{
   }
 
   if(action==="cancel"){
-    if(member.role==="VIEWER") return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
+    if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(member.role)) return new Response(JSON.stringify({error:"Operator access required"}),{status:403,headers:H});
     const id=String(b.job_id||"");
     const {data,error}=await admin.from("research_job_queue").update({
       status:"CANCELLED",finished_at:new Date().toISOString(),updated_at:new Date().toISOString()
@@ -60,7 +62,7 @@ Deno.serve(async(req:Request)=>{
   }
 
   if(action!=="enqueue") return new Response(JSON.stringify({error:"Unknown action"}),{status:400,headers:H});
-  if(member.role==="VIEWER") return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
+  if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(member.role)) return new Response(JSON.stringify({error:"Operator access required"}),{status:403,headers:H});
 
   const ids=[...new Set([
     ...(Array.isArray(b.lead_ids)?b.lead_ids:[]),
@@ -76,7 +78,7 @@ Deno.serve(async(req:Request)=>{
   for(const id of ids){
     const lead:any=found.get(id);
     if(!lead){missing.push(id);continue}
-    const {data:active}=await admin.from("research_job_queue").select("id,status,strategy,created_at")
+    const {data:active}=await admin.from("research_job_queue").select("id,lead_id,organization_id,job_type,status,strategy,created_at")
       .eq("organization_id",orgId).eq("lead_id",id).eq("job_type","LEAD_RESEARCH")
       .in("status",["PENDING","RUNNING","RETRY"]).order("created_at",{ascending:false}).limit(1).maybeSingle();
     if(active){existing.push(active);continue}
@@ -89,8 +91,7 @@ Deno.serve(async(req:Request)=>{
     const payload={
       objective:b.objective||"Investigação profunda assíncrona baseada em evidências",
       cnpj:resolvedCnpj||null,
-      source:"research_queue",
-      ...(b.payload&&typeof b.payload==="object"?b.payload:{})
+      source:"research_queue"
     };
     const {data:job,error}=await admin.from("research_job_queue").insert({
       organization_id:orgId,lead_id:id,requested_by:user.id,job_type:"LEAD_RESEARCH",
@@ -108,5 +109,3 @@ Deno.serve(async(req:Request)=>{
   if(created.length||existing.some((x:any)=>["PENDING","RETRY"].includes(x.status))) dispatchWorker(url,auth);
   return new Response(JSON.stringify({ok:true,created,existing,missing,queued:created.length,processing_started:Boolean(created.length||existing.length)}),{headers:H});
 });
-
-

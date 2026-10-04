@@ -3,6 +3,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
+const uuid=(v:unknown)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+const reviewStatus=(code:unknown)=>({42501:403,P0002:404,22023:400,P0001:409} as Record<string,number>)[String(code)]||500;
 const cnpjNorm=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
 const cnpjShape=(v:unknown)=>/^[A-Z0-9]{12}[0-9]{2}$/.test(cnpjNorm(v));
 
@@ -22,19 +24,25 @@ Deno.serve(async(req:Request)=>{
   const candidateId=String(b.candidate_id||"");
   const action=String(b.action||"REJECT").toUpperCase();
   const reason=String(b.reason||"").trim();
-  if(!candidateId||action!=="REJECT")return new Response(JSON.stringify({error:"candidate_id and action=REJECT required"}),{status:400,headers:H});
-  if(reason.length<5)return new Response(JSON.stringify({error:"A rejection reason with at least 5 characters is required"}),{status:400,headers:H});
+  if(!uuid(candidateId)||action!=="REJECT")return new Response(JSON.stringify({error:"Valid candidate_id and action=REJECT required"}),{status:400,headers:H});
+  if(reason.length<5||reason.length>1000)return new Response(JSON.stringify({error:"A rejection reason with 5 to 1000 characters is required"}),{status:400,headers:H});
 
   const {data:p}=await admin.from("profiles").select("active_organization_id").eq("id",user.id).maybeSingle();
   const orgId=p?.active_organization_id;
   if(!orgId)return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
   const {data:m}=await admin.from("organization_members").select("role,status").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
   if(m?.status!=="ACTIVE")return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
-  if(m.role==="VIEWER")return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
+  if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(m.role))return new Response(JSON.stringify({error:"Operator access required"}),{status:403,headers:H});
 
   const {data:candidate}=await admin.from("candidate_entities").select("*").eq("id",candidateId).eq("organization_id",orgId).maybeSingle();
   if(!candidate)return new Response(JSON.stringify({error:"Candidate not found"}),{status:404,headers:H});
-  if(candidate.candidate_type!=="RFB_QSA_NAME_MATCH")return new Response(JSON.stringify({error:"Unsupported candidate type"}),{status:400,headers:H});
+  if(!['RFB_QSA_NAME_MATCH','RFB_COMPANY_NAME_MATCH'].includes(candidate.candidate_type))return new Response(JSON.stringify({error:"Unsupported candidate type"}),{status:400,headers:H});
+  if(candidate.candidate_type==='RFB_COMPANY_NAME_MATCH'){
+    if(candidate.entity_type!=='COMPANY')return new Response(JSON.stringify({error:'Company registry candidate required'}),{status:409,headers:H});
+    const reviewed=await admin.rpc('review_company_name_candidate',{p_org:orgId,p_user:user.id,p_candidate:candidate.id,p_action:'REJECT',p_reason:reason,p_company:null,p_evidence:null});
+    if(reviewed.error||!reviewed.data)return new Response(JSON.stringify({error:'Rejection blocked by a changed review or confirmed legal identity; use the identity review workflow'}),{status:reviewed.error?reviewStatus(reviewed.error.code):500,headers:H});
+    return new Response(JSON.stringify({ok:true,candidate_id:candidate.id,lead_id:candidate.lead_id,rejected:true,candidate:reviewed.data,recomputed:null,note:'Candidato empresarial descartado. Documentos, CNPJs confirmados e outros vínculos permanecem preservados.'}),{headers:H});
+  }
 
   const {data:lead}=await admin.from("leads").select("*").eq("id",candidate.lead_id).eq("organization_id",orgId).maybeSingle();
   if(!lead)return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
@@ -86,4 +94,3 @@ Deno.serve(async(req:Request)=>{
     note:"A rejeição remove este candidato da resolução automática. Outros candidatos permanecem sujeitos a validação."
   }),{headers:H});
 });
-

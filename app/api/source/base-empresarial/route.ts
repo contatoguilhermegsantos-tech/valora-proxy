@@ -104,10 +104,22 @@ export async function POST(req: Request) {
   const timeout = body.timeout_ms === undefined ? 15000 : body.timeout_ms
   if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 1000 || timeout > 15000) return result({ ok: false, error: 'INVALID_TIMEOUT' }, 400)
   if (body.operation === 'companies_search') {
-    if (Object.keys(body).some(key => !['operation', 'city_id', 'page', 'timeout_ms'].includes(key)) ||
-      typeof body.city_id !== 'string' || !/^\d{7}$/.test(body.city_id) ||
+    const nameKeys = ['corporate_name', 'trade_name'] as const
+    const names = nameKeys.filter(key => body[key] !== undefined)
+    const perPage = body.per_page === undefined ? (names.length ? 20 : 100) : body.per_page
+    if (Object.keys(body).some(key => !['operation', 'city_id', 'corporate_name', 'trade_name', 'per_page', 'page', 'timeout_ms'].includes(key)) ||
+      (body.city_id !== undefined && (typeof body.city_id !== 'string' || !/^\d{7}$/.test(body.city_id))) ||
+      (!body.city_id && !names.length) ||
+      names.some(key => typeof body[key] !== 'string' || (body[key] as string).trim().length < 3 || (body[key] as string).length > 180 || /[\u0000-\u001f\u007f]/.test(body[key] as string)) ||
+      typeof perPage !== 'number' || !Number.isInteger(perPage) || perPage < 1 || perPage > 100 ||
       typeof body.page !== 'number' || !Number.isInteger(body.page) || body.page < 1 || body.page > 10000) return result({ ok: false, error: 'INVALID_REQUEST' }, 400)
-    path = `/companies/search?city_id=${body.city_id}&per_page=100&sort=id&page=${body.page}`
+    const query = new URLSearchParams()
+    if (body.city_id) query.set('city_id', body.city_id as string)
+    for (const key of names) query.set(key, (body[key] as string).trim())
+    query.set('per_page', String(perPage))
+    query.set('sort', 'id')
+    query.set('page', String(body.page))
+    path = '/companies/search?' + query.toString()
   } else if (body.operation === 'company_detail') {
     if (Object.keys(body).some(key => !['operation', 'basic_cnpj', 'timeout_ms'].includes(key)) ||
       typeof body.basic_cnpj !== 'string' || !/^[A-Z0-9]{8}$/.test(body.basic_cnpj)) return result({ ok: false, error: 'INVALID_REQUEST' }, 400)
