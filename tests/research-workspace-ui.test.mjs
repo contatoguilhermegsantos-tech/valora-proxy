@@ -115,3 +115,10 @@ await test('Empty new lead name reports why research did not start',async()=>{co
 test('Failed or partial terminal phases and unsafe URLs never appear as successful coverage',()=>{
  const html=renderToStaticMarkup(React.createElement(workspace.ResearchWorkspace,{leadName:'QA',job:job({status:'FAILED'}),run:run({status:'FAILED',research_steps:[{id:'step',step_order:1,title:'Fonte',status:'FAILED',action_url:'javascript:alert(1)'}]}),hasJobId:true,starting:false,readOnly:false,error:'',configuration:null,onStart(){},onRefresh(){},onDismiss(){}}));assert.match(html,/research-phase issue/);assert.match(html,/Tentar nova pesquisa/);assert.equal(html.includes('href="javascript:'),false);assert.equal(html.includes('inteligência completa'),false);
 });
+test('A completed partial research has an explicit warning in the hero while fully completed research retains its label',()=>{
+ const props={leadName:'QA',hasJobId:true,starting:false,readOnly:false,error:'',configuration:null,onStart(){},onRefresh(){},onDismiss(){}};
+ const partial=renderToStaticMarkup(React.createElement(workspace.ResearchWorkspace,{...props,job:job({status:'COMPLETED',progress:{research_run_id:runId,research_status:'PARTIAL'}}),run:run({status:'PARTIAL'})}));
+ assert.match(partial,/<span class="badge pending">Finalizada · parcial<\/span>/);assert.match(partial,/Cobertura parcial/);
+ const completed=renderToStaticMarkup(React.createElement(workspace.ResearchWorkspace,{...props,job:job({status:'COMPLETED',progress:{research_run_id:runId,research_status:'COMPLETED'}}),run:run({status:'COMPLETED'})}));
+ assert.match(completed,/<span class="badge neutral">Concluída<\/span>/);assert.equal(completed.includes('Finalizada · parcial'),false);
+});
