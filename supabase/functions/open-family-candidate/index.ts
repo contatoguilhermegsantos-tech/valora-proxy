@@ -19,7 +19,8 @@ Deno.serve(async(req:Request)=>{
   if(membership.data?.status!=='ACTIVE'||!['OWNER','ADMIN','ANALYST','MEMBER'].includes(membership.data?.role))return reply({error:'Write access required'},403);
   const result=await admin.from('candidate_entities').select('*').eq('id',candidateId).eq('organization_id',org).maybeSingle();
   if(result.error)throw new Error('Could not load candidate');const c=result.data;
-  if(!c||c.candidate_type!=='FAMILY_CONTEXT_MATCH')return reply({error:'Candidate not found'},404);
+  if(!c||!['FAMILY_CONTEXT_MATCH','FAMILY_NETWORK_COMPANY','FAMILY_NETWORK_PERSON'].includes(c.candidate_type))return reply({error:'Candidate not found'},404);
+  if(c.candidate_type.startsWith('FAMILY_NETWORK_')&&c.metadata?.identity_confirmed!==false)return reply({error:'Network identity remains unresolved'},409);
   if(c.validation_status!=='UNVALIDATED'||c.confidence!=='LOW'||c.metadata?.kinship_confirmed!==false)return reply({error:'Candidate requires review; family attribution is not confirmed'},409);
   const type=String(b.entity_type||c.entity_type||'').toUpperCase(),md=c.metadata||{},cnpj=normalizeCompanyId(md.full_cnpj);
   if(!['PERSON','COMPANY'].includes(type)||!['PERSON','COMPANY'].includes(c.entity_type)||type==='PERSON'&&c.entity_type!=='PERSON')return reply({error:'Candidate entity type does not match'},409);

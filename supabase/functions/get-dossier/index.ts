@@ -1,5 +1,6 @@
 
 import {buildSourceRoutes,normalizeResearchStep} from '../_shared/source-router.ts';
+import {projectFamilyNetwork} from '../_shared/family-network-view.ts';
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, GET, OPTIONS"};
@@ -29,7 +30,7 @@ Deno.serve(async(req:Request)=>{
     admin.from("claims").select("*,claim_evidence(evidence_id,support_type,strength)").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
     admin.from("commercial_signals").select("*").eq("lead_id",leadId).eq("organization_id",orgId).eq("status","ACTIVE").order("created_at",{ascending:false}),
     admin.from("research_runs").select("*,research_steps(*)").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
-    admin.from("candidate_entities").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
+    admin.from("candidate_entities").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}).range(0,899),
     admin.from("investigation_questions").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
     admin.from("divergences").select("*").eq("lead_id",leadId).eq("organization_id",orgId).order("created_at",{ascending:false}),
     admin.from("lead_evidence_coverage").select("*").eq("lead_id",leadId).eq("organization_id",orgId).maybeSingle(),
@@ -95,12 +96,13 @@ Deno.serve(async(req:Request)=>{
   const {data:registry,error:registryError}=await admin.from('source_registry').select('key,name,connection_status,action_url,limitations');
   if(registryError)return new Response(JSON.stringify({error:'Could not load investigation source routes'}),{status:500,headers:H});
   const sourceRoutes=buildSourceRoutes(registry||[],{kind:lead.kind,companyResolved:(links.data||[]).some((l:any)=>['SUPPORTED','VERIFIED'].includes(l.status)),braveConfigured:!!Deno.env.get('BRAVE_SEARCH_API_KEY'),portalConfigured:!!Deno.env.get('PORTAL_TRANSPARENCIA_API_TOKEN')});
+  const dossierCandidates=(candidates.data||[]).map((c:any)=>c.candidate_type==='FAMILY_NETWORK_PIVOT'?{...c,metadata:{...c.metadata,state:undefined,public_graph:projectFamilyNetwork(c.metadata?.public_graph,candidates.data||[],evidence.data||[],orgId,leadId)}}:c);
   return new Response(JSON.stringify({
     ok:true,role:membership.role,lead,source_routes:sourceRoutes,web_context_hits:webHits.data||[],intelligence_snapshots:history.data||[],relationship_reviews:reviewLog.data||[],graph_candidate_reviews:candidateReviewLog.data||[],
     companies:(links.data||[]).map((l:any)=>({...l.companies,link_id:l.id,link_status:l.status,link_role:l.role_label})),
     people:people.data||[],extra_companies:extraCompanies.data||[],
     relationships:relationships.data||[],events:events.data||[],evidence:evidence.data||[],claims:claims.data||[],
-    signals:signals.data||[],research_runs:(runs.data||[]).map((r:any)=>({...r,research_steps:(r.research_steps||[]).map(normalizeResearchStep)})),candidates:candidates.data||[],questions:questions.data||[],
+    signals:signals.data||[],research_runs:(runs.data||[]).map((r:any)=>({...r,research_steps:(r.research_steps||[]).map(normalizeResearchStep)})),candidates:dossierCandidates,questions:questions.data||[],
     divergences:divergences.data||[],identity_assessments:identityAssessments.data||[],identity_audit:identityAudit.data||[],identity_source_attempts:identitySourceAttempts.data||[],coverage:coverage.data||null,source_coverage:sourceCoverage
   }),{headers:H});
 });

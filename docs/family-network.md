@@ -1,0 +1,19 @@
+# Mapa de conexões do pivô
+
+A descoberta inicial por sobrenome, município e atividade fornece CNPJs documentados. A expansão consulta cada cadastro, reúne os nomes físicos citados no QSA e procura outras empresas que citem esses nomes completos. O segmento inicial não restringe essas novas conexões: um cadastro rural pode levar a um supermercado ou outra atividade.
+
+O mapa distingue empresas pelo CNPJ completo. Uma pessoa é apresentada como uma ocorrência nominal dentro do QSA de um CNPJ; nomes iguais em registros diferentes permanecem separados, ligados por uma hipótese explícita. A participação é uma citação documental daquele cadastro, não uma confirmação de identidade, parentesco ou controle econômico.
+
+A pesquisa começa com as fontes cadastrais habilitadas. A varredura municipal alternativa Minha Receita lê todas as atividades, mantém um índice sanitizado no servidor e reavalia páginas já lidas quando encontra novos nomes. Nomes completos e o sobrenome original têm prioridade. Novos sobrenomes extraídos do QSA são pistas fracas e recebem orçamento separado após a varredura. A consulta inversa por nome completo usa Base Empresarial quando disponível. Falhas, limites, paginação parada e espera do fornecedor permanecem visíveis; nenhuma rodada confirma ausência de grupo familiar.
+
+O fluxo salva progresso e faz lotes sequenciais, com pausa e retomada. Cada execução tem limites de duração, páginas, consultas e tamanho do mapa. A leitura do dossiê esconde o índice e os cursores internos e só projeta caminhos com candidatos e documentos da organização e do lead atuais. A abertura de um nó cria ou reutiliza uma investigação independente, usando a mesma pesquisa normal do produto. Pessoas não herdam o endereço da empresa nem seu CNPJ.
+
+O caminho destacado dá prioridade às citações documentais e à correspondência de nome completo. Um atalho por sobrenome não substitui uma rota mais explicativa pelos CNPJs e nomes do QSA. Isso muda a apresentação do caminho, mantendo as hipóteses e a confiança baixa. A leitura em lote reutiliza nomes normalizados e evita reanalisar todo o índice a cada página, reduzindo o processamento por execução.
+
+Identificadores pessoais, completos ou mascarados, também são removidos quando aparecem embutidos em razão social ou nome fantasia, inclusive nos checkpoints retomados e na projeção de registros anteriores. CNPJ empresarial de 14 caracteres permanece disponível. Nome físico redigido não vira um novo pivô de pesquisa.
+
+O salvamento é atômico e compara a revisão atual do mapa. A revisão de candidatos ou documentos prevalece sobre uma consulta concorrente. Candidatos existentes não são sobrescritos por uma reconsulta; novos documentos são preservados separadamente. O descarte remove o nó e caminhos dependentes da apresentação. A auditoria verifica confiança, escopo documental, ausência de dados pessoais e segurança das arestas, junto às invariantes anteriores.
+
+Limites iniciais: 45 segundos por execução, oito páginas municipais, oito consultas de cadastro, duas consultas inversas, profundidade três, 120 empresas, 160 ocorrências de nomes, 400 conexões e checkpoint interno de até 2.000.000 bytes no formato armazenado. Até 30 empresas podem entrar por pistas fracas, em lotes de dez, sem ocupar a prioridade dos caminhos por nome completo. A interface executa até 12 lotes por acionamento e interrompe em conflito, erro, espera de todas as fontes elegíveis ou ausência de progresso. Uma fonte em espera não impede o avanço por outra fonte saudável. O mapa retoma automaticamente uma vez por visita quando há progresso elegível salvo e preserva a pausa solicitada pelo usuário.
+
+O código não contém nomes ou CNPJs específicos para forçar um resultado. Brave e Portal da Transparência continuam condicionados às credenciais e à configuração anterior do produto.

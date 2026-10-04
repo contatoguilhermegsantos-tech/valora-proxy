@@ -240,6 +240,15 @@ Deno.serve(async(req:Request)=>{
      const state=data?.status==='BLOCKED'?'BLOCKED':data?.status==='FAILED'?'FAILED':data?.complete===true?'COMPLETED':'PARTIAL';
      const provider=data?.provider==='minha_receita_rfb'||data?.search_lineage?.business_provider==='MINHA_RECEITA'?'minha_receita_rfb':'base_empresarial_rfb';
      await setStep('surname_candidates',state,data?.note||((data?.candidates_found||0)+' pista(s) por sobrenome e contexto empresarial. '+(data?.complete?'Recorte consultado encerrado; ausência de pistas não prova ausência de grupo familiar.':'Consulta parcial; continue a busca para ampliar o recorte.')),undefined,{provider,candidates_found:data?.candidates_found||0,complete:data?.complete===true,search_lineage:data?.search_lineage||null,pivot_id:data?.pivot?.id||null});
+     if(Number(data?.candidates_found)>0&&state!=='BLOCKED'&&state!=='FAILED'){
+      try{
+       const expanded=await callFn(url,auth,'family-network-discovery',{lead_id:leadId,research_run_id:run.id,action:'expand'});
+       const network=expanded.data?.network;
+       await setStep('surname_candidates','PARTIAL',expanded.resp.ok&&network
+        ? `Mapa iniciado com ${network.counts?.companies||0} CNPJ(s) e ${network.counts?.people||0} ocorrência(s) nominal(is) em QSA. As conexões são documentadas ou hipóteses explícitas; identidade e parentesco permanecem pendentes.`
+        : 'Pistas do pivô preservadas; a expansão do mapa não pôde ser concluída nesta rodada. Continue na seção Relações.',undefined,{provider,candidates_found:data.candidates_found,complete:false,search_lineage:data.search_lineage||null,pivot_id:data.pivot?.id||null,network_pivot_id:expanded.data?.pivot?.id||null,network_continuation:expanded.data?.continuation===true,network_counts:network?.counts||null});
+      }catch{await setStep('surname_candidates','PARTIAL','Pistas do pivô preservadas; a expansão do mapa exige retomada na seção Relações.',undefined,{provider,candidates_found:data.candidates_found,complete:false,pivot_id:data.pivot?.id||null})}
+     }
     }else await setStep('surname_candidates','FAILED',undefined,data?.error||('HTTP '+resp.status));
    }
   }

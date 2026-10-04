@@ -61,6 +61,15 @@ test('empresa candidata abre núcleo determinístico e enfileira a pesquisa norm
  assert.deepEqual(f.queueCalls[0].body,{action:'enqueue',lead_id:expected});assert.match(f.queueCalls[0].url,/\/research-queue$/);assert.equal(f.candidate.validation_status,'UNVALIDATED');assert.equal(f.writes.length,0);
 });
 
+test('nós de empresa e ocorrência QSA abrem pesquisa independente e só permitem descarte, sem resolução automática',async()=>{
+ for(const [candidateType,kind] of [['FAMILY_NETWORK_COMPANY','COMPANY'],['FAMILY_NETWORK_PERSON','PERSON']]){
+  const f=fixture({candidateType,kind,metadata:{identity_confirmed:false}}),opened=await handlerFor('open-family-candidate',f)(request());assert.equal(opened.status,200);assert.equal((await opened.json()).lead.identity_confirmed_by_user,false);
+  const rejected=fixture({candidateType,kind,metadata:{identity_confirmed:false}});assert.equal((await handlerFor('review-graph-candidate',rejected)(request({action:'REJECT',reason:'Homônimo sem vínculo comprovado'}))).status,200);assert.equal(rejected.rpcCalls[0].name,'review_graph_candidate');
+  const resolved=fixture({candidateType,kind,metadata:{identity_confirmed:false}});assert.equal((await handlerFor('review-graph-candidate',resolved)(request({action:'RESOLVE',reason:'Validar candidato pendente'}))).status,409);assert.equal(resolved.rpcCalls.length,0);
+  const unsafe=fixture({candidateType,kind,metadata:{identity_confirmed:true}});assert.equal((await handlerFor('open-family-candidate',unsafe)(request())).status,409);assert.equal(unsafe.rpcCalls.length,0);
+ }
+});
+
 test('pessoa do QSA abre investigação independente sem copiar endereço da empresa ou atribuir CNPJ à pessoa',async()=>{
  const f=fixture({kind:'PERSON'}),data=await (await handlerFor('open-family-candidate',f)(request({entity_type:'PERSON'}))).json();
  assert.equal(data.lead.id,await nodeLeadId(ORG,'PERSON','family-person:'+ID));assert.equal(data.lead.name,'Ana Santos');assert.equal(data.lead.initial_cnpj,null);assert.equal(data.lead.city,null);assert.equal(data.lead.state,null);assert.equal(data.lead.identity_status,'PENDING');assert.equal(f.writes.length,0);

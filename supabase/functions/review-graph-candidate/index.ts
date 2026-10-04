@@ -14,8 +14,8 @@ Deno.serve(async(req:Request)=>{
  const {data:m}=await admin.from('organization_members').select('role,status').eq('organization_id',org).eq('user_id',user.id).maybeSingle();if(m?.status!=='ACTIVE'||!['OWNER','ADMIN','ANALYST','MEMBER'].includes(m.role))return reply({error:'Write access required'},403);
  const b=await req.json().catch(()=>({})),id=String(b.candidate_id||''),action=String(b.action||''),reason=String(b.reason||'').trim(),cnpj=String(b.cnpj||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
  if(!/^[0-9a-f-]{36}$/i.test(id)||!['RESOLVE','REJECT'].includes(action)||reason.length<5||reason.length>2000)return reply({error:'Candidate, action and reason required'},400);
- const {data:c}=await admin.from('candidate_entities').select('*').eq('id',id).eq('organization_id',org).maybeSingle();if(!c||!['QSA_LEGAL_ENTITY','QSA_UNRESOLVED_ENTITY','FAMILY_CONTEXT_MATCH'].includes(c.candidate_type))return reply({error:'Candidate not found'},404);
- if(c.candidate_type==='FAMILY_CONTEXT_MATCH'&&action!=='REJECT')return reply({error:'A pista familiar pode ser aberta para pesquisa independente ou descartada; parentesco não é confirmado por este fluxo.'},409);
+ const {data:c}=await admin.from('candidate_entities').select('*').eq('id',id).eq('organization_id',org).maybeSingle();if(!c||!['QSA_LEGAL_ENTITY','QSA_UNRESOLVED_ENTITY','FAMILY_CONTEXT_MATCH','FAMILY_NETWORK_COMPANY','FAMILY_NETWORK_PERSON'].includes(c.candidate_type))return reply({error:'Candidate not found'},404);
+ if(['FAMILY_CONTEXT_MATCH','FAMILY_NETWORK_COMPANY','FAMILY_NETWORK_PERSON'].includes(c.candidate_type)&&action!=='REJECT')return reply({error:'A pista familiar pode ser aberta para pesquisa independente ou descartada; parentesco não é confirmado por este fluxo.'},409);
  const args:any={p_org:org,p_user:user.id,p_candidate:id,p_action:action,p_reason:reason};
  try{
   if(action==='RESOLVE'){

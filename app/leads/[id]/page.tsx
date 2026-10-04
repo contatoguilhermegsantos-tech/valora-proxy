@@ -7,6 +7,7 @@ import {IntelligenceHistory} from '@/components/IntelligenceHistory'
 import {GraphCompletionReview} from '@/components/GraphCompletionReview'
 import {InvestigationReadiness} from '@/components/InvestigationReadiness'
 import {FamilyDiscovery} from '@/components/FamilyDiscovery'
+import {FamilyNetworkGraph} from '@/components/FamilyNetworkGraph'
 import { Shell } from '@/components/Shell'
 import { StatusBadge } from '@/components/StatusBadge'
 import { RelationshipGraph } from '@/components/RelationshipGraph'
@@ -83,7 +84,7 @@ function LeadDossierContent(){
   <nav className="tabs section" style={{flexWrap:'wrap',overflow:'visible'}} aria-label="Seções do dossiê">{tabs.map(t=><button key={t.key} aria-pressed={tab===t.key} className={tab===t.key?'active':''} onClick={()=>setTab(t.key)}>{t.label}</button>)}</nav>
 
   {tab==='resumo'&&<CommercialBrief dossier={d}/>}{tab==='perfil'&&<CommercialBrief dossier={d} mode="profile"/>}
-  <div hidden={tab!=='pesquisa'&&tab!=='ecossistema'}><FamilyDiscovery dossier={d} onUpdated={load}/></div>
+  <div hidden={tab!=='pesquisa'&&tab!=='ecossistema'}><FamilyNetworkGraph dossier={d} onUpdated={load}/><FamilyDiscovery dossier={d} onUpdated={load}/></div>
   {tab==='pesquisa'&&<InvestigationReadiness dossier={d}/>}
   {tab==='historico'&&<IntelligenceHistory rows={d.intelligence_snapshots||[]} busy={busy} readOnly={d.role==='VIEWER'} onCapture={captureHistory}/>}
   {tab==='pendencias'&&<GraphCompletionReview dossier={d} onUpdated={load}/>}

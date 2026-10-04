@@ -1,0 +1,61 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
+import {familyContext,familyQueryFingerprint,familyStableId,familyNorm} from '../supabase/functions/_shared/family-discovery.ts';
+import {projectFamilyNetwork} from '../supabase/functions/_shared/family-network-view.ts';
+import {familyNetworkText} from '../supabase/functions/_shared/family-network-text.ts';
+const USER='11111111-1111-4111-8111-111111111111',ORG='22222222-2222-4222-8222-222222222222',LEAD='33333333-3333-4333-8333-333333333333',DOC='44444444-4444-4444-8444-444444444444',SOURCE='55555555-5555-4555-8555-555555555555';
+const flags={identity_confirmed:false,kinship_confirmed:false};
+async function fixture(options={}){
+ const state={role:'OWNER',user:{id:USER},foreign:false,rejected:false,documentStatus:'VERIFIED',conflict:false,rpcError:false,runMissing:false,...options},writes=[],commits=[],expansions=[],documents=[],logs=[];
+ const lead={id:LEAD,kind:'PERSON',name:'Ana Santos',city:'Barretos',state:'SP',segment:'Agro'};
+ const seed={id:USER,organization_id:ORG,lead_id:LEAD,candidate_type:'FAMILY_CONTEXT_MATCH',validation_status:'UNVALIDATED',confidence:'LOW',metadata:{...flags,query_fingerprint:await familyQueryFingerprint(familyContext(lead)),full_cnpj:'32901144000105',company_name:'Empresa QA',evidence_id:DOC,city:'Barretos',state:'SP'}};
+ const evidence={id:DOC,organization_id:ORG,lead_id:LEAD,verification_status:state.documentStatus,source_registry_id:SOURCE};
+ const priorCandidate=state.existing?{id:await familyStableId(`family-network|${ORG}|${LEAD}|company:32901144000105`),organization_id:ORG,lead_id:LEAD,candidate_type:'FAMILY_NETWORK_COMPANY',validation_status:'UNVALIDATED',confidence:'LOW',label:'Primeira observação preservada',metadata:{...flags,network_node_key:'company:32901144000105',full_cnpj:'32901144000105',evidence_id:DOC,company_name:'Primeira observação preservada',city:'Barretos',state:'SP',cnae_code:'0111301',segment:'Cultivo'}}:null;
+ const old={id:SOURCE,candidate_type:'FAMILY_NETWORK_PIVOT',validation_status:state.rejected?'REJECTED':'UNVALIDATED',metadata:{revision:4,state:{checkpoint:'private checkpoint'}}};
+ const db={auth:{getUser:async()=>({data:{user:state.user},error:null})},from(table){let mode='read',payload;const eqs={},q={};for(const m of ['select','single','maybeSingle','order','range','in'])q[m]=()=>q;q.eq=(k,v)=>{eqs[k]=v;return q};q.insert=p=>{mode='insert';payload=p;return q};q.then=(resolve,reject)=>Promise.resolve().then(()=>{
+  if(mode==='insert'){writes.push({table,payload});assert.equal(table,'source_fetch_logs');return {data:null,error:null}}
+  if(['leads','candidate_entities','evidence','research_runs'].includes(table))assert.equal(eqs.organization_id,ORG);
+  const data=table==='profiles'?{active_organization_id:ORG}:table==='organization_members'?{status:'ACTIVE',role:state.role}:table==='leads'?state.foreign?null:lead:table==='source_registry'?[{id:SOURCE,key:'minha_receita_rfb',connection_status:'CONNECTED_LIMITED'}]:table==='candidate_entities'?[seed,old,...(priorCandidate?[priorCandidate]:[])]:table==='evidence'?[evidence]:table==='research_runs'?state.runMissing?null:{id:USER}:null;return {data,error:null};
+ }).then(resolve,reject);return q},rpc:async(name,args)=>{assert.equal(name,'commit_family_network');commits.push(args);return {error:state.rpcError?(typeof state.rpcError==='object'?state.rpcError:{message:'review changed'}):null,data:state.conflict?{conflict:true}:{network:{...args.p_graph,revision:5},pivot:{id:SOURCE,metadata:{revision:5,public_graph:args.p_graph}}}}}};
+ const observation={key:'doc-key',provider:'MINHA_RECEITA',source_url:'https://minhareceita.org/32901144000105',full_cnpj:'32901144000105',company_name:'Empresa QA',city:'Barretos',state:'SP',cnae_code:'0111301',cnae_description:'Cultivo',people:[{name:'Ana Santos',role:'Sócio'}],queried_at:'2026-10-03T12:00:00Z',qsa_complete:true};
+ const expandFamilyNetwork=async(...args)=>{expansions.push(args);return {status:'PARTIAL',continuation:true,observations:[observation],nodes:[{key:'root',type:'ROOT',label:'Ana Santos',...flags},{key:'company:32901144000105',type:'COMPANY',label:'Empresa QA',full_cnpj:observation.full_cnpj,observation_key:'doc-key',...flags}],edges:[{id:'edge',from:'root',to:'company:32901144000105',kind:'ROOT_CONTEXT_CANDIDATE',observation_key:'doc-key',confidence:'LOW',validation_status:'UNVALIDATED',...flags}],state:{revision:4,municipal_index:[observation],retry_not_before:'2026-10-03T12:01:00Z',pagination_stalled:false,coverage_errors:[],limits_reached:[]},search_lineage:{notes:[],source_attempts:[{provider:'MINHA_RECEITA',status:503,error:'upstream unavailable'}]}}};
+ let handler;const source=fs.readFileSync(new URL('../supabase/functions/family-network-discovery/index.ts',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
+ vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,{Deno:{env:{get:()=> 'https://qa.supabase.co'},serve:f=>{handler=f}},createClient:()=>db,familyContext,familyQueryFingerprint,familyStableId,familyNorm,familyNetworkText,expandFamilyNetwork,persistSourceEvidence:async(_db,payload)=>{documents.push(payload);return {data:{...payload,id:DOC},error:null}},Response,Request,console:{error:(...args)=>logs.push(args)}});
+ return {handler,state,writes,commits,expansions,documents,logs};
+}
+const request=(body={lead_id:LEAD,action:'expand'},auth=true)=>new Request('https://qa.test',{method:'POST',headers:auth?{Authorization:'Bearer qa','Content-Type':'application/json'}:{},body:JSON.stringify(body)});
+test('expansão exige sessão, escrita, lead próprio e run próprio antes da consulta externa',async()=>{
+ for(const [options,body,auth,status] of [[{},undefined,false,401],[{user:null},undefined,true,401],[{role:'VIEWER'},undefined,true,403],[{role:'UNKNOWN'},undefined,true,403],[{foreign:true},undefined,true,404],[{runMissing:true},{lead_id:LEAD,research_run_id:USER},true,404]]){const f=await fixture(options);assert.equal((await f.handler(request(body,auth))).status,status);assert.equal(f.expansions.length,0);assert.equal(f.commits.length,0);assert.equal(f.writes.length,0)}
+});
+test('payload restrito bloqueia URLs, revisão externa e ação desconhecida',async()=>{
+ for(const body of [{lead_id:LEAD,url:'https://other.test'},{lead_id:LEAD,expected_revision:4},{lead_id:LEAD,action:'resolve'},[],{lead_id:'bad'}, {lead_id:LEAD,padding:'a'.repeat(2050)}]){const f=await fixture();assert.ok([400,413].includes((await f.handler(request(body))).status));assert.equal(f.expansions.length,0)}
+});
+test('documento revisado ou pivô rejeitado bloqueiam retomada sem reabrir revisão',async()=>{for(const options of [{rejected:true},{documentStatus:'REJECTED'}]){const f=await fixture(options),res=await f.handler(request());assert.equal(res.status,200);assert.equal((await res.json()).status,'BLOCKED');assert.equal(f.expansions.length,0);assert.equal(f.commits.length,0)}});
+test('CAS usa revisão interna, publica cooldown e registra falha real do provedor sem promover núcleo',async()=>{
+ const f=await fixture(),res=await f.handler(request());assert.equal(res.status,200);const body=await res.json();assert.equal(body.complete,false);assert.equal(body.network.retry_not_before,'2026-10-03T12:01:00Z');assert.equal(body.network.pagination_stalled,false);assert.equal(body.pivot.metadata.state,undefined);assert.equal(f.commits[0].p_revision,4);assert.equal(f.commits[0].p_candidates[0].metadata.identity_confirmed,false);assert.equal(f.commits[0].p_candidates[0].metadata.kinship_confirmed,false);assert.equal(f.writes[0].payload.success,false);assert.equal(f.writes[0].payload.http_status,503);assert.equal(f.documents[0].publisher,'Minha Receita');assert.equal(f.documents[0].verification_status,'VERIFIED');assert.equal(f.expansions[0][3].baseAvailable,false);
+});
+test('gravação concorrente ou revisão feita durante consulta devolve conflito e interrompe loop',async()=>{for(const options of [{conflict:true},{rpcError:true}]){const f=await fixture(options),res=await f.handler(request());assert.equal(res.status,409);assert.equal((await res.json()).continuation,false);assert.equal(f.writes.length,0)}});
+test('timeout de gravação é falha transitória, sem expor payload ou erro interno nos logs e resposta',async()=>{
+ const f=await fixture({rpcError:{code:'57014',message:'private untrusted row',details:'private payload'}}),res=await f.handler(request());assert.equal(res.status,503);const body=await res.json();assert.equal(body.continuation,false);assert.equal(body.status,'FAILED');assert.equal(f.writes.length,0);assert.equal(f.logs.length,1);assert.equal(f.logs[0][1].code,'57014');assert.equal(f.logs[0][1].reason,'UNCLASSIFIED');assert.equal(/private|payload|Ana|Santos/.test(JSON.stringify([body,f.logs])),false);
+});
+test('reconsulta preserva rótulo e documento da observação anterior sem sobrescrever candidato',async()=>{const f=await fixture({existing:true}),res=await f.handler(request());assert.equal(res.status,200);const graph=(await res.json()).network;assert.equal(graph.nodes[1].label,'Primeira observação preservada');assert.equal(graph.nodes[1].evidence_id,DOC);assert.equal(f.commits[0].p_candidates.length,0);assert.equal(f.documents[0].title,'Cadastro e nomes no QSA — Empresa QA')});
+function graphFixture(){
+ const doc={id:DOC,organization_id:ORG,lead_id:LEAD,verification_status:'VERIFIED',source_registry_id:SOURCE};
+ const nodes=[{key:'root',type:'ROOT',label:'Origem',...flags},...['a','b','c'].map(key=>({key,type:'COMPANY',candidate_id:key,evidence_id:DOC,full_cnpj:'32901144000105',label:key,...flags}))];
+ const candidates=nodes.slice(1).map(n=>({id:n.candidate_id,organization_id:ORG,lead_id:LEAD,candidate_type:'FAMILY_NETWORK_COMPANY',validation_status:'UNVALIDATED',confidence:'LOW',metadata:{...flags,network_node_key:n.key,full_cnpj:n.full_cnpj,evidence_id:DOC}}));
+ const edges=[['root','a'],['a','b'],['b','c']].map(([from,to],i)=>({id:String(i),from,to,kind:'SAME_NAME_CANDIDATE',confidence:'LOW',validation_status:'UNVALIDATED',evidence_ids:[DOC],...flags}));
+ return {graph:{nodes,edges,complete:true,municipal_index:['private'],state:{secret:'private'}},candidates,evidence:[doc]};
+}
+test('projeção esconde índice interno, descarta rejeitado e poda todos os nós sem caminho documental',()=>{
+ const f=graphFixture();f.candidates[1].validation_status='REJECTED';const p=projectFamilyNetwork(f.graph,f.candidates,f.evidence,ORG,LEAD);assert.deepEqual(p.nodes.map(n=>n.key),['root','a']);assert.equal(p.edges.length,1);assert.equal(p.complete,false);assert.equal(p.state,undefined);assert.equal(p.municipal_index,undefined);
+});
+test('reconsulta projetada mantém localidade e atividade apenas no nó de empresa, sem atribuí-las à pessoa do QSA',()=>{
+ const f=graphFixture();f.graph.nodes[1]={...f.graph.nodes[1],type:'PERSON_CITATION',person_name:'Ana Santos',city:'Barretos',state:'SP',cnae_code:'0111301',cnae_description:'Cultivo'};f.candidates[0].candidate_type='FAMILY_NETWORK_PERSON';f.candidates[0].metadata.person_name='Ana Santos';const p=projectFamilyNetwork(f.graph,f.candidates,f.evidence,ORG,LEAD);const person=p.nodes.find(n=>n.type==='PERSON_CITATION');assert.ok(person);assert.equal(person.city,undefined);assert.equal(person.state,undefined);assert.equal(person.cnae_code,undefined);assert.equal(person.cnae_description,undefined);assert.equal(person.person_name,'Ana Santos');
+});
+test('projeção bloqueia outra organização, evidência revisada, aresta sem documento e associação arbitrária de candidato',()=>{
+ for(const mutate of [f=>{f.evidence[0].organization_id='foreign'},f=>{f.evidence[0].verification_status='REJECTED'},f=>{f.graph.edges[0].evidence_ids=[]},f=>{f.graph.edges[0].kind='FAMILY'},f=>{f.graph.nodes[1].full_cnpj='23245844000106'},f=>{f.graph.nodes[1].type='PERSON_CITATION'}]){const f=graphFixture();mutate(f);const p=projectFamilyNetwork(f.graph,f.candidates,f.evidence,ORG,LEAD);assert.deepEqual(p.nodes.map(n=>n.key),['root']);assert.equal(p.edges.length,0)}
+ const f=graphFixture();f.graph.nodes[0].identity_confirmed=true;assert.equal(projectFamilyNetwork(f.graph,f.candidates,f.evidence,ORG,LEAD),null);
+});
