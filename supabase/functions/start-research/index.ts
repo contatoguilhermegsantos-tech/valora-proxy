@@ -277,12 +277,13 @@ Deno.serve(async(req:Request)=>{
   if(defs.some(s=>s.key==="municipal_gazettes")){
    await setStep("municipal_gazettes","RUNNING");
    const {resp,data}=await callFn(url,auth,"querido-diario-search",{lead_id:leadId,max_results:10,research_run_id:run.id});
+   const municipalMeta={territory_id:data?.territory_id||null,mentions_found:Number(data?.mentions_found||0),terms_searched:data?.terms_searched||[],complete:data?.complete===true,source_result:data?.status||null,wrapper_http_status:resp.status,upstream_http_status:data?.upstream_http_status??null,source_error:data?.source_error||null,source_errors:data?.source_errors||[],source_attempts:data?.source_attempts||[],queries_completed:data?.queries_completed||0,queries_failed:data?.queries_failed||0,queries_skipped:data?.queries_skipped||0,retry_after_seconds:data?.retry_after_seconds??null,retry_not_before:data?.retry_not_before||null,truncated:data?.truncated===true};
    if(resp.ok){
     const found=Number(data?.mentions_found||0);
-    await setStep("municipal_gazettes",found>0&&data?.status!=="PARTIAL"?"COMPLETED":"PARTIAL",
-      data?.status==="PARTIAL"?"Consulta incompleta; resultados parciais preservados. Não interpretar como ausência de menções.":found>0?found+" menção(ões) localizada(s) em Diários Oficiais municipais.":(data?.note||"Nenhuma menção encontrada na cobertura municipal consultada; isso não prova inexistência."),
-      undefined,{territory_id:data?.territory_id||null,mentions_found:found,terms_searched:data?.terms_searched||[]});
-   }else await setStep("municipal_gazettes","FAILED",undefined,data?.error||data?.note||("HTTP "+resp.status));
+    await setStep("municipal_gazettes",data?.status==='BLOCKED'?'BLOCKED':found>0&&data?.complete===true?"COMPLETED":"PARTIAL",
+      data?.note||(data?.status==="PARTIAL"?"Consulta incompleta; resultados parciais preservados. Não interpretar como ausência de menções.":found>0?found+" menção(ões) localizada(s) em Diários Oficiais municipais.":"Nenhuma menção encontrada na cobertura municipal consultada; isso não prova inexistência."),
+      undefined,municipalMeta);
+   }else await setStep("municipal_gazettes","FAILED",undefined,data?.error||data?.note||(data?.source_error?'Querido Diário: '+data.source_error+'. Consulta à fonte não concluída; não comprova ausência de menções.':"Falha ao executar consulta municipal (HTTP "+resp.status+"); resposta da fonte não confirmada."),municipalMeta);
   }
 
 

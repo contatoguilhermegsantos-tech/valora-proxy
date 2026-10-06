@@ -1,6 +1,9 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import {persistSourceEvidence} from '../_shared/source-evidence.ts';
+import {fetchSourceJson} from '../_shared/source-operations.ts';
+import {validQsaDiscoveryEvidence} from '../_shared/qsa-evidence.ts';
 
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
 const norm=(v:any)=>String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase().replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
@@ -11,17 +14,9 @@ async function hash(v:string){
   const d=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(v));
   return Array.from(new Uint8Array(d)).map(x=>x.toString(16).padStart(2,"0")).join("");
 }
-async function fetchJsonRetry(url:string,attempts=4){
-  let last=0;
-  for(let i=0;i<attempts;i++){
-    const r=await fetch(url,{signal:AbortSignal.timeout(12000),headers:{Accept:"application/json","User-Agent":"MAX-Identity/1.0"}});
-    last=r.status;
-    const txt=await r.text();
-    if(r.ok){let j:any={};try{j=JSON.parse(txt)}catch{};return {ok:true,status:r.status,json:j}}
-    if(r.status!==429)return {ok:false,status:r.status,json:null};
-    await sleep([350,800,1600,2600][i]||3000);
-  }
-  return {ok:false,status:last,json:null};
+async function fetchJsonRetry(url:string,timeoutMs:number){
+  const r=await fetchSourceJson(url,v=>v&&typeof v==='object'&&Array.isArray(v.qsa),{timeoutMs,headers:{'User-Agent':'MAX-Identity/1.1'}});
+  return {...r,json:r.data};
 }
 
 Deno.serve(async(req:Request)=>{
@@ -45,23 +40,35 @@ Deno.serve(async(req:Request)=>{
   if(!orgId)return new Response(JSON.stringify({error:"No active organization"}),{status:409,headers:H});
   const {data:m}=await admin.from("organization_members").select("role,status").eq("organization_id",orgId).eq("user_id",user.id).maybeSingle();
   if(m?.status!=="ACTIVE")return new Response(JSON.stringify({error:"No organization access"}),{status:403,headers:H});
-  if(m.role==="VIEWER")return new Response(JSON.stringify({error:"Viewer is read-only"}),{status:403,headers:H});
+  if(!['OWNER','ADMIN','ANALYST','MEMBER'].includes(m.role))return new Response(JSON.stringify({error:"Operator access required"}),{status:403,headers:H});
   const {data:lead}=await admin.from("leads").select("*").eq("id",leadId).eq("organization_id",orgId).maybeSingle();
   if(!lead)return new Response(JSON.stringify({error:"Lead not found"}),{status:404,headers:H});
   if(lead.kind!=="PERSON")return new Response(JSON.stringify({ok:true,groups:[],note:"Cross identity validation applies to PERSON leads."}),{headers:H});
 
-  const {data:candidates}=await admin.from("candidate_entities").select("*")
+  if(researchRunId){if(!/^[0-9a-f-]{36}$/i.test(researchRunId))return new Response(JSON.stringify({error:'Valid research_run_id required'}),{status:400,headers:H});const run=await admin.from('research_runs').select('id').eq('id',researchRunId).eq('organization_id',orgId).eq('lead_id',leadId).maybeSingle();if(run.error)return new Response(JSON.stringify({error:'Could not validate run'}),{status:500,headers:H});if(!run.data)return new Response(JSON.stringify({error:'Run not found in lead scope'}),{status:404,headers:H});}
+  const {data:candidates,error:candidateError}=await admin.from("candidate_entities").select("*")
     .eq("organization_id",orgId).eq("lead_id",leadId).eq("candidate_type","RFB_QSA_NAME_MATCH")
     .neq("validation_status","REJECTED");
 
-  const usable=(candidates||[]).filter((c:any)=>cnpjShape(c.metadata?.full_cnpj)&&norm(c.metadata?.partner_name||lead.name)===norm(lead.name)).slice(0,12);
+  if(candidateError)return new Response(JSON.stringify({error:'Could not load candidates'}),{status:500,headers:H});
+  const {data:discoverySource,error:discoverySourceError}=await admin.from('source_registry').select('id').eq('key','base_empresarial_rfb').maybeSingle();
+  if(discoverySourceError||!discoverySource)return new Response(JSON.stringify({error:'Discovery source registry unavailable'}),{status:500,headers:H});
+  const usable:any[]=[];
+  for(const c of (candidates||[]).slice(0,12)){
+    const doc=await admin.from('evidence').select('*').eq('id',c.metadata?.evidence_id||'00000000-0000-0000-0000-000000000000').eq('organization_id',orgId).eq('lead_id',leadId).maybeSingle();
+    if(doc.error)return new Response(JSON.stringify({error:'Could not validate discovery evidence'}),{status:500,headers:H});
+    if(doc.data?.source_registry_id===discoverySource.id&&validQsaDiscoveryEvidence(c,lead,doc.data,'base_empresarial_rfb'))usable.push(c);
+  }
   if(usable.length<2)return new Response(JSON.stringify({ok:true,candidates_checked:usable.length,groups:[],note:"Need at least two active company candidates to cross-validate identity."}),{headers:H});
 
   const observations:any[]=[];
+  const started=Date.now();
   for(const c of usable){
+    const remaining=22000-(Date.now()-started);if(remaining<1000)break;
     const cnpj=cnpjNorm(c.metadata?.full_cnpj);
-    const resp=await fetchJsonRetry("https://brasilapi.com.br/api/cnpj/v1/"+cnpj);
-    if(!resp.ok){observations.push({candidate_id:c.id,cnpj,ok:false,http_status:resp.status});continue}
+    const resp=await fetchJsonRetry("https://brasilapi.com.br/api/cnpj/v1/"+cnpj,Math.min(8000,Math.floor((remaining-500)/2)));
+    if(!resp.ok){observations.push({candidate_id:c.id,cnpj,ok:false,http_status:resp.status,source_error:resp.error});if(resp.status===429||resp.status===403)break;continue}
+    if(cnpjNorm(resp.json?.cnpj)!==cnpj){observations.push({candidate_id:c.id,cnpj,ok:false,http_status:resp.status,source_error:'CNPJ_CONTEXT_MISMATCH'});continue;}
     const qsa=Array.isArray(resp.json?.qsa)?resp.json.qsa:[];
     const person=qsa.find((x:any)=>Number(x?.identificador_de_socio||0)===2&&norm(x?.nome_socio)===norm(lead.name));
     const masked=String(person?.cnpj_cpf_do_socio||"").trim();
@@ -81,8 +88,10 @@ Deno.serve(async(req:Request)=>{
     const arr=grouped.get(o.fingerprint_hash)||[];arr.push(o);grouped.set(o.fingerprint_hash,arr);
   }
 
-  const {data:source}=await admin.from("source_registry").select("id").eq("key","brasilapi_cnpj").maybeSingle();
+  const {data:source,error:sourceError}=await admin.from("source_registry").select("id").eq("key","brasilapi_cnpj").maybeSingle();
+  if(sourceError||!source)return new Response(JSON.stringify({error:'Cross source registry unavailable'}),{status:500,headers:H});
   const groups:any[]=[];
+  const errors:any[]=[];
   for(const [fp,members] of grouped){
     if(members.length<2)continue;
     const now=new Date().toISOString();
@@ -94,49 +103,30 @@ Deno.serve(async(req:Request)=>{
       const c=usable.find((x:any)=>x.id===member.candidate_id);
       if(!c)continue;
       const md=c.metadata||{};
-      const validation=c.validation_status==="CONFIRMED"?"CONFIRMED":"SUPPORTED";
-      await admin.from("candidate_entities").update({
-        validation_status:validation,confidence:"HIGH",
-        metadata:{...md,cross_identity_validation:{
-          matched:true,method:"MASKED_QSA_IDENTIFIER_HASH",fingerprint_hash:fp,
-          group_id:groupId,group_size:members.length,anchor_confirmed:anchorConfirmed,validated_at:now
-        }}
-      }).eq("id",c.id);
-
       const dedupeKey="identity_cross_qsa:"+leadId+":"+c.id+":"+groupId;
       const evHash=await hash(dedupeKey);
-      const {data:ev}=await admin.from("evidence").upsert({
+      const {data:ev,error:evidenceError}=await persistSourceEvidence(admin,{
         organization_id:orgId,lead_id:leadId,source_registry_id:source?.id||null,
         title:"Validação cruzada de identidade no QSA — "+String(c.label||md.company_name||"empresa"),
         source_label:"BrasilAPI CNPJ (origem: base pública RFB)",
-        source_url:md.source_url||("https://brasilapi.com.br/api/cnpj/v1/"+member.cnpj),
+        source_url:"https://brasilapi.com.br/api/cnpj/v1/"+member.cnpj,
         source_kind:"AGGREGATOR",document_type:"QSA_CROSS_IDENTITY_MATCH",
         publisher:"BrasilAPI / dados de origem RFB",retrieved_at:now,evidence_hash:evHash,dedupe_key:dedupeKey,
         reliability_weight:0.8,raw_reference:"candidate="+c.id+"; group="+groupId,
         excerpt:"O mesmo nome completo e o mesmo identificador fiscal parcialmente mascarado aparecem no QSA de "+members.length+" empresas candidatas. O identificador bruto não é armazenado pelo MAX. Este cruzamento sustenta que os vínculos provavelmente pertencem à mesma pessoa, mas não substitui confirmação humana.",
         verification_status:"VERIFIED",last_verified_at:now,usage_scope:"INTERNAL",created_by:user.id
-      },{onConflict:"organization_id,dedupe_key"}).select("id").maybeSingle();
-
-      await admin.from("identity_assessments").insert({
-        organization_id:orgId,lead_id:leadId,candidate_entity_id:c.id,research_run_id:researchRunId,
-        score:anchorConfirmed?95:88,decision:c.validation_status==="CONFIRMED"?"CONFIRMED":"SUPPORTED",
-        factors:{exact_name:true,cross_qsa_masked_identifier_match:true,group_size:members.length,anchor_confirmed:anchorConfirmed,evidence_id:ev?.id||null},
-        engine_version:"identity-cross-v1.0",
-        explanation:anchorConfirmed
-          ?"Vínculo cruzado com candidato já confirmado pelo usuário por identificador fiscal mascarado consistente em QSA."
-          :"Múltiplos vínculos empresariais compartilham nome completo e identificador fiscal mascarado consistente em QSA; suporte forte, não confirmação humana.",
-        created_by:user.id
       });
-
-      updated.push({candidate_id:c.id,label:c.label,validation_status:validation,evidence_id:ev?.id||null});
+      if(evidenceError||!ev||ev.verification_status!=='VERIFIED'){errors.push({candidate_id:c.id,error:evidenceError?.message||'Cross document requires review'});continue;}
+      const applied=await admin.rpc('record_qsa_cross_validation',{p_org:orgId,p_user:user.id,p_candidate:c.id,p_expected_status:c.validation_status,p_expected_meta:md,p_cross:{matched:true,method:'MASKED_QSA_IDENTIFIER_HASH',fingerprint_hash:fp,group_id:groupId,group_size:members.length,anchor_confirmed:anchorConfirmed},p_evidence:ev.id,p_run:researchRunId});
+      if(applied.error){errors.push({candidate_id:c.id,error:'Cross support could not be applied to current review'});continue;}
+      if(applied.data?.applied)updated.push({candidate_id:c.id,label:c.label,validation_status:applied.data.validation_status,evidence_id:ev.id});
     }
-    groups.push({group_id:groupId,size:members.length,anchor_confirmed:anchorConfirmed,candidates:updated});
+    if(updated.length)groups.push({group_id:groupId,size:updated.length,observed_size:members.length,anchor_confirmed:anchorConfirmed,candidates:updated});
   }
 
   return new Response(JSON.stringify({
-    ok:true,candidates_checked:usable.length,observations:observations.map(x=>({candidate_id:x.candidate_id,cnpj:x.cnpj,ok:x.ok,http_status:x.http_status||null,has_fingerprint:Boolean(x.fingerprint_hash)})),
-    groups,
+    ok:errors.length===0,complete:observations.length===usable.length&&!errors.length&&observations.every(x=>x.ok),candidates_checked:observations.length,observations:observations.map(x=>({candidate_id:x.candidate_id,cnpj:x.cnpj,ok:x.ok,http_status:x.http_status||null,source_error:x.source_error||null,has_fingerprint:Boolean(x.fingerprint_hash)})),
+    groups,errors,
     caveat:"O MAX compara apenas um hash do identificador fiscal parcialmente mascarado e não armazena o valor bruto. Match cruzado sustenta identidade, mas não promove automaticamente o lead a VERIFIED."
   }),{headers:H});
 });
-
