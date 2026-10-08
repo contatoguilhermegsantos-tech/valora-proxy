@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fetchSourceJson,selectTerritory,searchOutcome,summarizeSourceHealth,advanceCoverage} from '../supabase/functions/_shared/source-operations.ts';
+import {fetchSourceJson,selectTerritory,searchOutcome,summarizeSourceHealth,summarizeQualityRun,advanceCoverage} from '../supabase/functions/_shared/source-operations.ts';
 
 test('município exige nome exato e UF; homônimos não escolhem a primeira cidade',()=>{
  const cities=[{territory_id:'1',territory_name:'São João',state_code:'SP'},{territory_id:'2',territory_name:'São João',state_code:'PR'}];
@@ -52,4 +52,26 @@ test('cobertura PNCP só avança por datas contíguas; reparar lacuna recupera d
  assert.equal(advanceCoverage('2026-09-27',dates),'2026-09-27');
  dates[0].status='DONE';assert.equal(advanceCoverage('2026-09-27',dates),'2026-09-29');
  assert.equal(advanceCoverage('2026-09-26',dates),'2026-09-26');
+});
+
+test('falha na consulta da autoauditoria não vira violação medida nem expõe o erro privado',()=>{
+ const quality=summarizeQualityRun({status:'FAIL',critical_count:1,warning_count:0,finished_at:'2026-10-07T00:00:00Z',snapshot:{error:'PRIVATE_QUERY_ERROR',secret:'PRIVATE_SNAPSHOT'}});
+ assert.equal(quality.completed,false);assert.equal(quality.error_code,'AUDIT_QUERY_FAILED');
+ assert.equal(quality.critical_count,null);assert.equal(quality.warning_count,null);
+ assert.doesNotMatch(JSON.stringify(quality),/PRIVATE|snapshot/);
+});
+
+test('autoauditoria concluída preserva violações reais e alertas',()=>{
+ const quality=summarizeQualityRun({status:'FAIL',critical_count:2,warning_count:1,finished_at:'2026-10-07T00:00:00Z',snapshot:{metrics:{invalid_lead_cnpjs:2,stuck_research_runs:1}}});
+ assert.equal(quality.completed,true);assert.equal(quality.error_code,null);
+ assert.equal(quality.critical_count,2);assert.equal(quality.warning_count,1);
+ assert.equal('snapshot' in quality,false);
+});
+
+test('autoauditoria sem execução permanece ausente; PASS e histórico sem snapshot mantêm o contrato',()=>{
+ assert.equal(summarizeQualityRun(null),null);
+ for(const snapshot of [undefined,null,{metrics:{}}]){
+  const quality=summarizeQualityRun({status:'PASS',critical_count:0,warning_count:0,finished_at:'2026-10-07T00:00:00Z',snapshot});
+  assert.equal(quality.completed,true);assert.equal(quality.status,'PASS');assert.equal(quality.critical_count,0);
+ }
 });

@@ -36,12 +36,13 @@ function SourcesContent(){
  const done=pncpQueue.filter((x:any)=>x.status==='DONE').length
  const failed=pncpQueue.filter((x:any)=>x.status==='FAILED').length
  const quality=data?.quality
+ const auditUnavailable=quality?.completed===false
  const auditStale=quality&&Date.now()-Date.parse(quality.finished_at)>2*3600000
  return <Shell>
   <div className="top"><div><div className="h1">Fontes</div><div className="sub">Conexão cadastrada, consultas observadas e cobertura disponível.</div></div><button className="btn" disabled={loading} onClick={()=>setRevision(v=>v+1)}>{loading?'Atualizando…':'Atualizar status'}</button></div>
   {error&&<div className="banner bad section" role="alert">{error} {data&&'Os dados abaixo são da última atualização concluída.'}</div>}
   {data&&<div className="banner section">Consultas desta organização nas últimas 48 horas, até 500 registros recentes. Sem registro não significa fonte saudável nem ausência de informações. Atualizar status não inicia novas pesquisas.<div className="micro">Atualizado em {dateTime(data.observation?.checked_at)}{data.observation?.sample_limited?' · Amostra atingiu o limite de 500 consultas.':''}</div></div>}
-  {quality&&<div className={auditStale||quality.critical_count||quality.warning_count?'banner bad section':'banner section'}><strong>Autoauditoria: {quality.status}</strong> · {quality.critical_count} violação(ões) · {quality.warning_count} alerta(s)<div className="micro">Última execução: {dateTime(quality.finished_at)}{auditStale?' · Atenção: sem execução concluída há mais de duas horas.':''}</div></div>}
+  {quality&&<div className={auditUnavailable||auditStale||quality.critical_count||quality.warning_count?'banner bad section':'banner section'}>{auditUnavailable?<><strong>Autoauditoria indisponível</strong><div>A consulta não foi concluída; as verificações de confiança ainda não puderam ser avaliadas.</div></>:<><strong>Autoauditoria: {quality.status}</strong> · {quality.critical_count} violação(ões) · {quality.warning_count} alerta(s)</>}<div className="micro">{auditUnavailable?'Última tentativa':'Última execução'}: {dateTime(quality.finished_at)}{auditStale?' · Atenção: sem execução concluída há mais de duas horas.':''}</div></div>}
   {pncpQueue.length>0&&<div className={failed?'banner bad section':'banner section'}><strong>PNCP — recuperação de cobertura:</strong> {done}/{pncpQueue.length} dia(s) concluído(s), {pncpQueue.length-done} restante(s){failed?', '+failed+' com falha':''}. A data de cobertura abaixo só avança após uma consulta completa.</div>}
   <div className="card table-wrap section"><table className="table"><thead><tr><th>Fonte</th><th>Conexão cadastrada</th><th>Consultas da organização</th><th>Sincronização compartilhada</th><th>Limitações / ação</th></tr></thead><tbody>{(data?.sources||[]).map((r:any)=>{
    const s=syncMap.get(r.key),h=healthMap.get(r.id)

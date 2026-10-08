@@ -76,3 +76,18 @@ export function summarizeSourceHealth(logs: any[]) {
     };
   });
 }
+
+// An audit query failure is an unavailable check, not a measured invariant violation.
+// Keep the journal's raw snapshot private; expose only the operational outcome.
+export function summarizeQualityRun(run: {status: string; critical_count: number; warning_count: number; finished_at: string; snapshot?: unknown} | null) {
+  if (!run) return null;
+  const queryFailed = !!run.snapshot && typeof run.snapshot === 'object' && 'error' in run.snapshot;
+  return {
+    status: run.status,
+    critical_count: queryFailed ? null : run.critical_count,
+    warning_count: queryFailed ? null : run.warning_count,
+    finished_at: run.finished_at,
+    completed: !queryFailed,
+    error_code: queryFailed ? 'AUDIT_QUERY_FAILED' : null,
+  };
+}

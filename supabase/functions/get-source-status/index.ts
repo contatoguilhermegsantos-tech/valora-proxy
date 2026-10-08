@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { summarizeSourceHealth } from "../_shared/source-operations.ts";
+import { summarizeSourceHealth, summarizeQualityRun } from "../_shared/source-operations.ts";
 const H={"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
 Deno.serve(async(req:Request)=>{
  if(req.method==="OPTIONS")return new Response("ok",{headers:H});
@@ -21,10 +21,10 @@ Deno.serve(async(req:Request)=>{
   admin.from("source_candidate_backlog").select("id,source_key,source_name,source_url,category,intended_use,official_or_primary,auth_requirement,coverage_notes,limitations,status,priority,updated_at").order("priority"),
   admin.from("source_sync_state").select("source_key,last_successful_date,last_status,last_attempt_at,last_success_at"),
   admin.from("source_backfill_queue").select("source_key,target_date,status,attempts").order("target_date"),
-  admin.from("system_quality_runs").select("status,critical_count,warning_count,finished_at").neq("status","RUNNING").order("finished_at",{ascending:false}).limit(1).maybeSingle(),
+  admin.from("system_quality_runs").select("status,critical_count,warning_count,finished_at,snapshot").neq("status","RUNNING").order("finished_at",{ascending:false}).limit(1).maybeSingle(),
   admin.from("source_fetch_logs").select("source_registry_id,result_status,success,duration_ms,queried_at").eq("organization_id",p.active_organization_id).gte("queried_at",since).order("queried_at",{ascending:false}).limit(500)
  ]);
  const error=[sources,backlog,sync,backfill,quality,logs].find(r=>r.error)?.error;
  if(error)return new Response(JSON.stringify({error:error.message}),{status:500,headers:H});
- return new Response(JSON.stringify({sources:sources.data,backlog:backlog.data,sync:sync.data,backfill:backfill.data,quality:quality.data,health:summarizeSourceHealth(logs.data||[]),observation:{since,checked_at:new Date().toISOString(),sample_limit:500,sample_limited:logs.data?.length===500}}),{headers:H});
+ return new Response(JSON.stringify({sources:sources.data,backlog:backlog.data,sync:sync.data,backfill:backfill.data,quality:summarizeQualityRun(quality.data),health:summarizeSourceHealth(logs.data||[]),observation:{since,checked_at:new Date().toISOString(),sample_limit:500,sample_limited:logs.data?.length===500}}),{headers:H});
 });
