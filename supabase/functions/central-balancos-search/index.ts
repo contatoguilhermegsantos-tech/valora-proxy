@@ -2,6 +2,7 @@ import {sourceBatches} from '../_shared/source-batches.ts';
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { fetchSourceJson } from "../_shared/source-operations.ts";
 
 const H={
   "Content-Type":"application/json",
@@ -29,19 +30,8 @@ async function sha256(v:string){
   return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
 }
 async function getJson(url:string){
-  let last="";
-  for(let attempt=0;attempt<3;attempt++){
-    try{
-      const r=await fetch(url,{headers:{Accept:"application/json","User-Agent":"MAX-Intelligence/1.0"}});
-      const text=await r.text();
-      if(r.ok&&text.trim()){
-        try{return {ok:true,status:r.status,data:JSON.parse(text),error:null}}
-        catch(e){last="Invalid JSON: "+String(e)}
-      }else last="HTTP "+r.status+(text?" — "+text.slice(0,180):"");
-    }catch(e){last=String(e)}
-    if(attempt<2) await new Promise(res=>setTimeout(res,400*Math.pow(2,attempt)));
-  }
-  return {ok:false,status:502,data:null,error:last||"Central de Balanços unavailable"};
+  const result=await fetchSourceJson(url,v=>!!v&&typeof v==="object",{timeoutMs:8000,headers:{"User-Agent":"MAX-Intelligence/1.0"}});
+  return result.ok?{ok:true,status:result.status,data:result.data,error:null}:{ok:false,status:result.status||502,data:null,error:result.error||"Central de Balanços unavailable"};
 }
 
 Deno.serve(async(req:Request)=>{
@@ -114,7 +104,7 @@ Deno.serve(async(req:Request)=>{
 
   const pageSize=100,maxPages=5;
   const docs:any[]=[];
-  let totalCount=0;
+  let totalCount=0,partial=false,partialError:string|null=null;
   for(let page=1;page<=maxPages;page++){
     const u=API+"/Demonstracao/"+encodeURIComponent(String(participant.id))+"/0/0?page="+page+"&pageSize="+pageSize;
     const dr=await getJson(u);
@@ -125,6 +115,7 @@ Deno.serve(async(req:Request)=>{
         http_status:dr.status,success:false,duration_ms:Date.now()-started,error_summary:dr.error,created_by:user.id
       });
       if(!docs.length) return new Response(JSON.stringify({error:"Central de Balanços document query failed",detail:dr.error}),{status:502,headers:H});
+      partial=true;partialError=dr.error;
       break;
     }
     const items=Array.isArray(dr.data?.items)?dr.data.items:[];
@@ -161,7 +152,7 @@ Deno.serve(async(req:Request)=>{
     if(er.error)return new Response(JSON.stringify({error:'Evidence persistence failed'}),{status:500,headers:H});
     const read=await admin.from('evidence').select('id,dedupe_key,verification_status').eq('organization_id',orgId).eq('lead_id',leadId).in('dedupe_key',batch.map(e=>e.dedupe_key));
     if(read.error)return new Response(JSON.stringify({error:'Could not load evidence review'}),{status:500,headers:H});
-    evidence.push(...(read.data||[]).filter(e=>e.verification_status==='VERIFIED'));
+    evidence.push(...(read.data||[]).filter((e:any)=>e.verification_status==='VERIFIED'));
   }
   const evidenceByKey=new Map(evidence.map((x:any)=>[x.dedupe_key,x.id]));
 
@@ -210,22 +201,22 @@ Deno.serve(async(req:Request)=>{
   await Promise.all([
     admin.from("source_fetch_logs").insert({
       organization_id:orgId,research_run_id:b.research_run_id||null,source_registry_id:source?.id,
-      endpoint_reference:"Central de Balanços /Demonstracao/{participante}/0/0",result_status:"SUCCESS",
-      http_status:200,success:true,duration_ms:Date.now()-started,error_summary:null,created_by:user.id
+      endpoint_reference:"Central de Balanços /Demonstracao/{participante}/0/0",result_status:partial?"PARTIAL":"SUCCESS",
+      http_status:partial?502:200,success:!partial,duration_ms:Date.now()-started,error_summary:partialError,created_by:user.id
     }),
     admin.from("source_registry").update({
       connection_status:"CONNECTED",last_checked_at:now,
       limitations:"Fonte pública oficial do SPED. Participação/publicação depende do universo coberto pela Central; ausência de documento não prova ausência de demonstrações, lucro, dividendos, patrimônio ou ato societário. O MAX registra metadados/publicações e não presume valores econômicos sem evidência explícita."
     }).eq("key","central_balancos_sped"),
     admin.from("source_sync_state").upsert({
-      source_key:"central_balancos_sped",last_attempt_at:now,last_success_at:now,last_status:"SUCCESS",last_error:null,
+      source_key:"central_balancos_sped",last_attempt_at:now,last_success_at:partial?null:now,last_status:partial?"PARTIAL":"SUCCESS",last_error:partialError,
       records_indexed:unique.length,metadata:{last_cnpj:cnpj,participant_id:participant.id,total_count:totalCount,records_returned:unique.length},updated_at:now
     },{onConflict:"source_key"})
   ]);
 
   return new Response(JSON.stringify({
     ok:true,participant_found:true,participant_id:participant.id,documents_found:totalCount,
-    documents_processed:unique.length,persisted:evidence.length,new_events:insertedEvents.length,truncated:totalCount>unique.length
+    documents_processed:unique.length,persisted:evidence.length,new_events:insertedEvents.length,truncated:totalCount>unique.length,partial
   }),{headers:H});
 });
 

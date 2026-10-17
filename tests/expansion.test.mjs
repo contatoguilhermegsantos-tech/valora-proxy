@@ -28,4 +28,3 @@ test('empresa no grafo não perde o status do vínculo confirmado no resumo',()=
  assert.equal(buildCommercialBrief(d).companies[0].link_status,'VERIFIED');
  d.companies[0].link_status='REJECTED';assert.equal(buildCommercialBrief(d).companies.length,0);
 });
-

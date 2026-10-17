@@ -31,4 +31,3 @@ test('nome diferente não recebe pontos de coincidência antiga',()=>{
 test('ausência de candidatos permanece sem conclusão',()=>{
  const r=assessIdentity(lead,[]);assert.equal(r.top,null);assert.equal(r.ambiguous,false);
 });
-

@@ -122,4 +122,3 @@ $function$;
 REVOKE ALL ON FUNCTION public.max_invariant_snapshot() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.max_invariant_snapshot() TO service_role;
 REVOKE ALL ON FUNCTION public.guard_lead_identity_regression() FROM PUBLIC, anon, authenticated;
-

@@ -4,7 +4,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { fetchSourceJson, advanceCoverage } from "../_shared/source-operations.ts";
 import { sourceBatches } from '../_shared/source-batches.ts';
 const H={"Content-Type":"application/json"};
-const digits=(v:unknown)=>String(v??"").replace(/\D/g,"");
+const cnpjNorm=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+const cnpjShape=(v:unknown)=>/^[A-Z0-9]{12}[0-9]{2}$/.test(cnpjNorm(v));
 const toDate=(v:unknown)=>{const s=String(v??"").trim();return s&&s.length>=10?s.slice(0,10):null};
 const num=(v:unknown)=>{if(v===null||v===undefined||v==="")return null;const n=Number(v);return Number.isFinite(n)?n:null};
 const ymd=(d:Date)=>String(d.getUTCFullYear())+String(d.getUTCMonth()+1).padStart(2,"0")+String(d.getUTCDate()).padStart(2,"0");
@@ -53,10 +54,10 @@ Deno.serve(async(req:Request)=>{
    pagesFetched++;recordsSeen+=rows.length;if(!rows.length){finished=true;break;}
    const pageMap=new Map<string,any>();
    for(const r of rows){
-    const supplier=digits(r.niFornecedor??r.fornecedor?.ni??r.fornecedor?.cnpj),personType=String(r.tipoPessoa??r.tipoPessoaFornecedor??r.fornecedor?.tipoPessoa??"").toUpperCase();
-    if(supplier.length!==14||(personType&&personType!=="PJ"))continue;
+    const supplier=cnpjNorm(r.niFornecedor??r.fornecedor?.ni??r.fornecedor?.cnpj),personType=String(r.tipoPessoa??r.tipoPessoaFornecedor??r.fornecedor?.tipoPessoa??"").toUpperCase();
+    if(!cnpjShape(supplier)||(personType&&personType!=="PJ"))continue;
     const control=String(r.numeroControlePNCP??r.numeroControlePncp??r.id??"").trim();if(!control)continue;
-    const orgCnpj=digits(r.orgaoEntidade?.cnpj??r.orgao?.cnpj??r.cnpjOrgao??r.orgaoCnpj),orgName=String(r.orgaoEntidade?.razaoSocial??r.orgao?.razaoSocial??r.nomeOrgao??"").trim()||null;
+    const orgCnpj=cnpjNorm(r.orgaoEntidade?.cnpj??r.orgao?.cnpj??r.cnpjOrgao??r.orgaoCnpj),orgName=String(r.orgaoEntidade?.razaoSocial??r.orgao?.razaoSocial??r.nomeOrgao??"").trim()||null;
     const year=Number(r.anoContrato??r.ano??0)||null,seq=r.sequencialContrato??r.sequencial??null,sourceUrl=orgCnpj&&year&&seq?"https://pncp.gov.br/app/contratos/"+orgCnpj+"/"+year+"/"+seq:endpoint.toString();
     pageMap.set(control,{pncp_control_number:control,supplier_cnpj:supplier,supplier_name:String(r.nomeRazaoSocialFornecedor??r.fornecedor?.nome??"").trim()||null,public_body_cnpj:orgCnpj||null,public_body_name:orgName,administrative_unit:String(r.unidadeOrgao?.nomeUnidade??r.unidade?.nomeUnidade??r.nomeUnidade??"").trim()||null,object_text:String(r.objetoContrato??r.objeto??"").trim()||null,contract_number:String(r.numeroContratoEmpenho??r.numeroContrato??"").trim()||null,contract_year:year,contract_type:String(r.tipoContrato?.nome??r.tipoContratoNome??r.tipoContratoId??"").trim()||null,initial_value:num(r.valorInicial),global_value:num(r.valorGlobal),accumulated_value:num(r.valorAcumulado),signature_date:toDate(r.dataAssinatura),validity_start:toDate(r.dataVigenciaInicio),validity_end:toDate(r.dataVigenciaFim),pncp_publication_date:r.dataPublicacaoPncp??r.dataPublicacaoPNCP??null,pncp_update_date:r.dataAtualizacao??r.dataAtualizacaoGlobal??null,source_url:sourceUrl,raw_public_metadata:{categoriaProcessoNome:r.categoriaProcesso?.nome??r.categoriaProcessoNome??null,modalidadeNome:r.modalidadeNome??r.modalidade?.nome??null,numeroParcelas:r.numeroParcelas??null,valorParcela:num(r.valorParcela)},indexed_at:new Date().toISOString()});
    }
@@ -83,7 +84,7 @@ Deno.serve(async(req:Request)=>{
   const previous=String(prev?.last_successful_date||"");
   const {data:dates,error:datesError}=await admin.from("source_backfill_queue").select("target_date,status").eq("source_key","pncp").gt("target_date",previous||"1900-01-01").order("target_date").limit(1000);
   // A repaired gap may unlock later already-completed dates, but never skip missing days.
-  if(!datesError)update.last_successful_date=previous?advanceCoverage(previous,(dates||[]).map(d=>d.target_date===iso(to)?{...d,status:"DONE"}:d)):iso(to);
+  if(!datesError)update.last_successful_date=previous?advanceCoverage(previous,(dates||[]).map((d:any)=>d.target_date===iso(to)?{...d,status:"DONE"}:d)):iso(to);
   update.last_success_at=now;update.records_indexed=recordsIndexed;
  }
  await admin.from("source_sync_state").upsert(update,{onConflict:"source_key"});

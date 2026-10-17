@@ -43,6 +43,13 @@ test('PNCP retoma a página não salva, mantém tamanho 100 e só conclui no fim
  response=await (await sync(body)).json();assert.equal(response.status,'SUCCESS');assert.equal(db.tables.source_sync_state[0].last_successful_date,'2026-09-28');assert.equal(db.tables.public_contract_index.length,8);
  assert.ok(seen.every(x=>x[1]==='100'));assert.deepEqual(seen.map(x=>x[0]),[1,2,2,3,4,5,6,7,8]);
 });
+test('PNCP preserva CNPJ alfanumérico do fornecedor e não o transforma em outro identificador',async()=>{
+ const db=database();
+ const sync=handler('pncp-sync-contracts',db,async()=>Response.json({totalPaginas:1,data:[{numeroControlePNCP:'contract-alpha',niFornecedor:'12AB.34CD/0001-56',tipoPessoa:'PJ'}]}));
+ const response=await (await sync({queue_id:'q',date_from:'2026-09-28',date_to:'2026-09-28'})).json();
+ assert.equal(response.status,'SUCCESS');
+ assert.equal(db.tables.public_contract_index[0].supplier_cnpj,'12AB34CD000156');
+});
 test('dois workers concorrentes não processam a mesma data; progresso reenfileira',async()=>{
  const db=database();db.tables.source_backfill_queue[0].status='PENDING';let calls=0;
  const worker=handler('pncp-backfill-step',db,async()=>{calls++;db.tables.source_backfill_queue[0].next_page=6;return Response.json({status:'PARTIAL'})});

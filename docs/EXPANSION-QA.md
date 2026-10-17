@@ -27,4 +27,3 @@
 
 Esta entrega não ativa fontes dependentes de credenciais e não interpreta automaticamente o conteúdo completo de balanços. A camada comercial é baseada em regras e documentos disponíveis; perguntas de descoberta não são oportunidades financeiras comprovadas. Dados públicos podem continuar insuficientes para faturamento, margem, dívida atual, liquidez ou histórico completo. Personificação por homônimos permanece sujeita à resolução de identidade.
 
-

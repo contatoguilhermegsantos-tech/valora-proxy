@@ -30,4 +30,3 @@ Deno.serve(async(req:Request)=>{
   return new Response(JSON.stringify({ok:critical===0,status,critical_count:critical,warning_count:warning,run_id:run.id,snapshot}),{headers:H});
 });
 
-

@@ -16,13 +16,20 @@ Deno.serve(async(req:Request)=>{
  if(!['PERSON','COMPANY'].includes(type)||![id,originId].every(v=>/^[0-9a-f-]{36}$/i.test(v)))return reply({error:'Invalid node'},400);
  const {data:p}=await admin.from('profiles').select('active_organization_id').eq('id',user.id).single();const org=p?.active_organization_id;
  const {data:member}=await admin.from('organization_members').select('role,status').eq('organization_id',org).eq('user_id',user.id).maybeSingle();
- if(member?.status!=='ACTIVE'||member.role==='VIEWER')return reply({error:'Sem permissão para expandir este núcleo.'},403);
+ if(member?.status!=='ACTIVE'||!['OWNER','ADMIN','ANALYST','MEMBER'].includes(member.role))return reply({error:'Sem permissão para expandir este núcleo.'},403);
  const {data:origin}=await admin.from('leads').select('id').eq('id',originId).eq('organization_id',org).maybeSingle();
  if(!origin)return reply({error:'Origin lead not found'},404);
- const {data:relations,error:relError}=await admin.from('relationships').select('id,from_entity_type,from_entity_id,to_entity_type,to_entity_id').eq('lead_id',originId).eq('organization_id',org).neq('status','REJECTED');
+ const {data:relations,error:relError}=await admin.from('relationships').select('id,status,classification,from_entity_type,from_entity_id,to_entity_type,to_entity_id,relationship_evidence(evidence_id,support_type)').eq('lead_id',originId).eq('organization_id',org).in('status',['PENDING','SUPPORTED','VERIFIED']);
  if(relError)throw relError;
- const relation=relations?.find(r=>(r.from_entity_type===type&&r.from_entity_id===id)||(r.to_entity_type===type&&r.to_entity_id===id));
- if(!relation)return reply({error:'Este nó não pertence às relações ativas do lead.'},404);
+ const scopedRelations=(relations||[]).filter((r:any)=>['PENDING','SUPPORTED','VERIFIED'].includes(r.status)&&['FACT','INDICATION'].includes(r.classification)&&((r.from_entity_type===type&&r.from_entity_id===id)||(r.to_entity_type===type&&r.to_entity_id===id)));
+ if(!scopedRelations.length)return reply({error:'Este nó não possui relação ativa elegível para expansão.'},409);
+ const ids=[...new Set(scopedRelations.flatMap((r:any)=>(r.relationship_evidence||[]).map((e:any)=>e.evidence_id)))];
+ if(!ids.length)return reply({error:'A relação exige um documento de suporte antes da expansão.'},409);
+ const {data:documents,error:documentError}=await admin.from('evidence').select('id').eq('organization_id',org).eq('lead_id',originId).eq('verification_status','VERIFIED').in('id',ids);
+ if(documentError)throw documentError;
+ const verified=new Set((documents||[]).map((e:any)=>e.id));
+ const relation=scopedRelations.find((r:any)=>(r.relationship_evidence||[]).some((e:any)=>e.support_type==='SUPPORTS'&&verified.has(e.evidence_id))&&!(r.relationship_evidence||[]).some((e:any)=>e.support_type==='CONTRADICTS'&&verified.has(e.evidence_id)));
+ if(!relation)return reply({error:'A relação exige suporte documental vigente e sem contradição antes da expansão.'},409);
  const {data:entity,error:entityError}=await admin.from(type==='COMPANY'?'companies':'people').select('*').eq('organization_id',org).eq('id',id).maybeSingle();
  if(entityError)throw entityError;if(!entity)return reply({error:'Entity not found'},404);
  const deterministicId=await nodeLeadId(org,type,id);
@@ -53,4 +60,3 @@ Deno.serve(async(req:Request)=>{
  return reply({ok:true,lead,reused,research,research_error:researchError});
  }catch(e){return reply({error:e instanceof Error?e.message:String((e as any)?.message||e)},500);}
 });
-
